@@ -1,0 +1,1153 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="dark" />
+<title>YO'LDA — reys nazorati</title>
+<style>
+  :root {
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  html { height: 100%; scroll-padding-top: env(safe-area-inset-top, 0px); }
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100%; background: #14171A; color: #ECEDEE; font-family: Inter, system-ui, -apple-system, sans-serif; -webkit-tap-highlight-color: transparent; }
+  #root { min-height: 100%; }
+  input, button, textarea { font-family: inherit; }
+  img { -webkit-user-drag: none; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.25.6/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef } = React;
+
+// ---------------- Supabase ulanishi ----------------
+const SUPABASE_URL = "https://orflkpzbmluqfrebdaho.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9yZmxrcHpibWx1cWZyZWJkYWhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTE2NjQyMTgsImV4cCI6MjEwNzI0MDIxOH0.wng5OwkrEbeDKNv6-RP6ypXe9hIaBvnNevkvLno1wh8";
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// ---------------- Lokal (qurilmaga xos) ko'rsatkich ----------------
+// Faqat "bu qurilma hozir qaysi haydovchi / qaysi reys bilan ishlayapti" shu yerda
+// saqlanadi. Haqiqiy ma'lumotlarning HAMMASI Supabase'da — telefon o'chsa ham yo'qolmaydi.
+function loadLocal() {
+  try {
+    const raw = localStorage.getItem("yolda_local");
+    return raw ? JSON.parse(raw) : { driver: null, activeTripId: null };
+  } catch {
+    return { driver: null, activeTripId: null };
+  }
+}
+function saveLocal(v) {
+  try { localStorage.setItem("yolda_local", JSON.stringify(v)); } catch {}
+}
+
+const COLORS = {
+  bg: "#14171A", panel: "#1D2126", panel2: "#232830", border: "#2B3138",
+  amber: "#F5A623", green: "#3CE07A", red: "#FF5C5C", text: "#ECEDEE", muted: "#828A93",
+};
+
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+function num(v) { const n = parseFloat(v); return isNaN(n) ? 0 : n; }
+function fmt(n, d = 0) { return (Math.round(n * 10 ** d) / 10 ** d).toLocaleString("ru-RU"); }
+function fmtDate(ts) { return new Date(ts).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }); }
+function photoUrl(p) { return typeof p === "string" ? p : p?.url; }
+function photoComment(p) { return typeof p === "string" ? "" : (p?.comment || ""); }
+function resizeImage(file, maxW = 480) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, maxW / img.width);
+        const canvas = document.createElement("canvas");
+        canvas.width = img.width * scale; canvas.height = img.height * scale;
+        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", 0.55));
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+// DB ustunlariga mos kelmaydigan, faqat ko'rsatish uchun hisoblanadigan maydonlarni olib tashlaydi
+function eventRawData(ev) {
+  const { id, type, at, distance, motoChasWorked, ...rest } = ev;
+  return rest;
+}
+
+// ---------------- Ichki SVG ikonkalar (tashqi kutubxonasiz) ----------------
+function Icon({ size = 20, color = "currentColor", children }) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{children}</svg>;
+}
+const Truck = (p) => <Icon {...p}><rect x="1" y="6" width="13" height="11"/><path d="M14 9h4l3 3v5h-7z"/><circle cx="6" cy="19" r="1.7"/><circle cx="17.5" cy="19" r="1.7"/></Icon>;
+const Package = (p) => <Icon {...p}><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></Icon>;
+const PackageCheck = (p) => <Icon {...p}><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M9 12l2 2 4-4"/></Icon>;
+const Fuel = (p) => <Icon {...p}><line x1="4" y1="22" x2="4" y2="9"/><rect x="4" y="2" width="10" height="20"/><path d="M14 9h2a2 2 0 0 1 2 2v3a1.5 1.5 0 0 0 3 0V7l-3-3"/></Icon>;
+const Repeat = (p) => <Icon {...p}><path d="M17 2l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></Icon>;
+const Camera = (p) => <Icon {...p}><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></Icon>;
+const MapPin = (p) => <Icon {...p}><path d="M21 10c0 7-9 12-9 12s-9-5-9-12a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></Icon>;
+const Check = (p) => <Icon {...p}><path d="M20 6L9 17l-5-5"/></Icon>;
+const X = (p) => <Icon {...p}><path d="M18 6L6 18"/><path d="M6 6l12 12"/></Icon>;
+const ChevronRight = (p) => <Icon {...p}><path d="M9 18l6-6-6-6"/></Icon>;
+const ChevronLeft = (p) => <Icon {...p}><path d="M15 18l-6-6 6-6"/></Icon>;
+const AlertTriangle = (p) => <Icon {...p}><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></Icon>;
+const HistoryIcon = (p) => <Icon {...p}><path d="M3 3v5h5"/><path d="M3.05 13a9 9 0 1 0 2.13-6.36L3 8"/><path d="M12 7v5l4 2"/></Icon>;
+const User = (p) => <Icon {...p}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></Icon>;
+const Gauge = (p) => <Icon {...p}><path d="M12 15l3.5-5"/><circle cx="12" cy="12" r="10"/><path d="M6.5 19a7.5 7.5 0 0 1 11 0"/></Icon>;
+const Plus = (p) => <Icon {...p}><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></Icon>;
+const ArrowRight = (p) => <Icon {...p}><line x1="5" y1="12" x2="19" y2="12"/><path d="M12 5l7 7-7 7"/></Icon>;
+
+const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Roboto+Mono:wght@500;700&family=Inter:wght@400;500;600&display=swap');`;
+
+// ---------------- Umumiy UI ----------------
+function Panel({ children, style }) {
+  return <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 10, padding: 16, ...style }}>{children}</div>;
+}
+function Field({ label, value, onChange, type = "number", placeholder, suffix, hint }) {
+  return (
+    <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <span style={{ fontFamily: "Inter", fontSize: 12.5, color: COLORS.muted, fontWeight: 500 }}>{label}</span>
+      <div style={{ position: "relative" }}>
+        <input type={type} inputMode={type === "number" ? "decimal" : "text"} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder}
+          style={{ width: "100%", boxSizing: "border-box", background: COLORS.panel2, border: `1px solid ${COLORS.border}`, borderRadius: 8, padding: "11px 12px", color: COLORS.text, fontFamily: "'Roboto Mono', monospace", fontSize: 15, fontWeight: 500, outline: "none" }} />
+        {suffix && <span style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", color: COLORS.muted, fontSize: 12, fontFamily: "Inter" }}>{suffix}</span>}
+      </div>
+      {hint && <span style={{ fontSize: 11, color: COLORS.muted }}>{hint}</span>}
+    </label>
+  );
+}
+function Btn({ children, onClick, variant = "primary", full, disabled, icon: IconC }) {
+  const styles = {
+    primary: { background: COLORS.amber, color: "#1A1300", border: "none" },
+    ghost: { background: "transparent", color: COLORS.text, border: `1px solid ${COLORS.border}` },
+    danger: { background: "transparent", color: COLORS.red, border: `1px solid ${COLORS.red}55` },
+  };
+  return (
+    <button onClick={onClick} disabled={disabled} style={{ ...styles[variant], opacity: disabled ? 0.5 : 1, width: full ? "100%" : "auto", padding: "12px 18px", borderRadius: 9, fontFamily: "Inter", fontWeight: 600, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, cursor: disabled ? "not-allowed" : "pointer" }}>
+      {IconC && <IconC size={16} />}{children}
+    </button>
+  );
+}
+function SegmentedChoice({ options, value, onChange }) {
+  return (
+    <div style={{ display: "flex", gap: 8 }}>
+      {options.map((o) => (
+        <button key={o.id} onClick={() => onChange(o.id)} style={{ flex: 1, padding: "10px 0", borderRadius: 8, border: `1px solid ${value === o.id ? COLORS.amber : COLORS.border}`, background: value === o.id ? COLORS.amber + "1A" : COLORS.panel2, color: value === o.id ? COLORS.amber : COLORS.text, fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: "Inter" }}>{o.label}</button>
+      ))}
+    </div>
+  );
+}
+const COMMENT_MAX = 120;
+
+function CameraCaptureModal({ onCapture, onClose }) {
+  const videoRef = useRef(null); const canvasRef = useRef(null); const fileInputRef = useRef(null); const streamRef = useRef(null);
+  const [stage, setStage] = useState("loading");
+  const [capturedUrl, setCapturedUrl] = useState(null);
+  const [comment, setComment] = useState("");
+
+  async function startStream() {
+    setStage("loading");
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) throw new Error("unsupported");
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      streamRef.current = stream;
+      if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play(); }
+      setStage("live");
+    } catch { setStage("unsupported"); }
+  }
+  useEffect(() => { startStream(); return () => { streamRef.current?.getTracks().forEach((t) => t.stop()); }; }, []);
+  function stopStream() { streamRef.current?.getTracks().forEach((t) => t.stop()); streamRef.current = null; }
+  function capture() {
+    const video = videoRef.current, canvas = canvasRef.current;
+    if (!video || !canvas) return;
+    const maxW = 480, scale = Math.min(1, maxW / (video.videoWidth || maxW));
+    canvas.width = (video.videoWidth || maxW) * scale; canvas.height = (video.videoHeight || maxW) * scale;
+    canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+    setCapturedUrl(canvas.toDataURL("image/jpeg", 0.6)); stopStream(); setStage("preview");
+  }
+  function retake() { setCapturedUrl(null); setComment(""); startStream(); }
+  async function handleFallbackFile(e) { const file = e.target.files?.[0]; if (file) { setCapturedUrl(await resizeImage(file)); setStage("preview"); } e.target.value = ""; }
+  function closeAll() { stopStream(); onClose(); }
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "#000", zIndex: 70, display: "flex", flexDirection: "column" }}>
+      <div style={{ position: "absolute", top: 0, left: 0, right: 0, display: "flex", justifyContent: "flex-end", padding: 14, zIndex: 2 }}>
+        <button onClick={closeAll} style={{ background: "#00000099", border: "none", borderRadius: "50%", width: 34, height: 34, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}><X size={18} /></button>
+      </div>
+      {stage === "loading" && <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "#9AA0A6", fontFamily: "Inter", fontSize: 13 }}>Kamera ochilmoqda...</div>}
+      {stage === "unsupported" && (
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16, padding: 24, textAlign: "center" }}>
+          <div style={{ color: "#9AA0A6", fontFamily: "Inter", fontSize: 13 }}>Ilova ichidagi kameraga ruxsat berilmadi yoki qo'llab-quvvatlanmaydi. Odatdagi kamera orqali davom eting.</div>
+          <Btn onClick={() => fileInputRef.current?.click()} icon={Camera}>Rasmga olish</Btn>
+          <input ref={fileInputRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={handleFallbackFile} />
+        </div>
+      )}
+      {stage === "live" && (
+        <>
+          <video ref={videoRef} playsInline muted style={{ flex: 1, width: "100%", objectFit: "cover", background: "#000" }} />
+          <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, display: "flex", justifyContent: "center", padding: "0 0 calc(28px + env(safe-area-inset-bottom))" }}>
+            <button onClick={capture} aria-label="Rasmga olish" style={{ width: 68, height: 68, borderRadius: "50%", background: "#fff", border: "4px solid #ffffff55", cursor: "pointer" }} />
+          </div>
+        </>
+      )}
+      {stage === "preview" && (
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+          <img src={capturedUrl} alt="" style={{ flex: 1, width: "100%", objectFit: "contain", background: "#000", minHeight: 0 }} />
+          <div style={{ background: COLORS.panel, padding: "12px 14px calc(14px + env(safe-area-inset-bottom))", display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, background: COLORS.panel2, border: `1px solid ${COLORS.border}`, borderRadius: 18, padding: "6px 6px 6px 12px" }}>
+              <input autoFocus value={comment} onChange={(e) => setComment(e.target.value.slice(0, COMMENT_MAX))} placeholder="Izoh yozish... (ixtiyoriy)" style={{ flex: 1, minWidth: 0, background: "transparent", border: "none", outline: "none", color: COLORS.text, fontFamily: "Inter", fontSize: 13 }} />
+              <span style={{ fontSize: 9, color: COLORS.muted, flexShrink: 0 }}>{comment.length}/{COMMENT_MAX}</span>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <Btn variant="ghost" full onClick={retake}>Qayta olish</Btn>
+              <Btn full onClick={() => onCapture({ url: capturedUrl, comment: comment.trim() })} icon={Check}>Saqlash</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+      <canvas ref={canvasRef} style={{ display: "none" }} />
+    </div>
+  );
+}
+
+function PhotoPicker({ label, photo, onPick, onClear, required, allowComment }) {
+  const inputRef = useRef(null); const [cameraOpen, setCameraOpen] = useState(false);
+  const url = photo ? photoUrl(photo) : null; const comment = photo ? photoComment(photo) : "";
+  function openCapture() { if (allowComment) setCameraOpen(true); else inputRef.current?.click(); }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <span style={{ fontFamily: "Inter", fontSize: 12.5, color: COLORS.muted, fontWeight: 500 }}>{label}{required && <span style={{ color: COLORS.red }}> *</span>}</span>
+      {url ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, width: 88 }}>
+          <div style={{ position: "relative", width: 88, height: 88 }}>
+            <img src={url} alt="" style={{ width: 88, height: 88, objectFit: "cover", borderRadius: 8, border: `1px solid ${COLORS.border}` }} />
+            <button onClick={onClear} style={{ position: "absolute", top: -6, right: -6, background: COLORS.red, border: "none", borderRadius: "50%", width: 20, height: 20, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}><X size={12} /></button>
+          </div>
+          {comment && <span style={{ fontSize: 9.5, color: COLORS.muted, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={comment}>{comment}</span>}
+        </div>
+      ) : (
+        <button onClick={openCapture} style={{ width: 88, height: 88, borderRadius: 8, border: `1px dashed ${COLORS.border}`, background: COLORS.panel2, color: COLORS.muted, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, cursor: "pointer" }}>
+          <Camera size={19} /><span style={{ fontSize: 9.5, fontFamily: "Inter" }}>rasmga olish</span>
+        </button>
+      )}
+      {!allowComment && <input ref={inputRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={async (e) => { const file = e.target.files?.[0]; if (file) onPick(await resizeImage(file)); e.target.value = ""; }} />}
+      {cameraOpen && <CameraCaptureModal onClose={() => setCameraOpen(false)} onCapture={(result) => { onPick(result); setCameraOpen(false); }} />}
+    </div>
+  );
+}
+function MultiPhotoPicker({ label, photos, onChange, required, allowComment }) {
+  const inputRef = useRef(null); const [cameraOpen, setCameraOpen] = useState(false);
+  function openCapture() { if (allowComment) setCameraOpen(true); else inputRef.current?.click(); }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <span style={{ fontFamily: "Inter", fontSize: 12.5, color: COLORS.muted, fontWeight: 500 }}>{label}{required && <span style={{ color: COLORS.red }}> *</span>}</span>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+        {photos.map((p, i) => {
+          const url = photoUrl(p), comment = photoComment(p);
+          return (
+            <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4, width: 72 }}>
+              <div style={{ position: "relative", width: 72, height: 72 }}>
+                <img src={url} alt="" style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 8, border: `1px solid ${COLORS.border}` }} />
+                <button onClick={() => onChange(photos.filter((_, idx) => idx !== i))} style={{ position: "absolute", top: -6, right: -6, background: COLORS.red, border: "none", borderRadius: "50%", width: 18, height: 18, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}><X size={10} /></button>
+              </div>
+              {comment && <span style={{ fontSize: 9, color: COLORS.muted, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={comment}>{comment}</span>}
+            </div>
+          );
+        })}
+        <button onClick={openCapture} style={{ width: 72, height: 72, borderRadius: 8, border: `1px dashed ${COLORS.border}`, background: COLORS.panel2, color: COLORS.muted, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3, cursor: "pointer" }}>
+          <Plus size={16} /><span style={{ fontSize: 9, fontFamily: "Inter" }}>qo'shish</span>
+        </button>
+      </div>
+      {!allowComment && <input ref={inputRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={async (e) => { const file = e.target.files?.[0]; if (file) onChange([...photos, await resizeImage(file)]); e.target.value = ""; }} />}
+      {cameraOpen && <CameraCaptureModal onClose={() => setCameraOpen(false)} onCapture={(result) => { onChange([...photos, result]); setCameraOpen(false); }} />}
+    </div>
+  );
+}
+function AddressPicker({ value, onChange }) {
+  const [loading, setLoading] = useState(false);
+  function detect() {
+    if (!navigator.geolocation) return;
+    setLoading(true);
+    navigator.geolocation.getCurrentPosition((pos) => { onChange(`${pos.coords.latitude.toFixed(5)}, ${pos.coords.longitude.toFixed(5)}`); setLoading(false); }, () => setLoading(false), { timeout: 8000 });
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <span style={{ fontFamily: "Inter", fontSize: 12.5, color: COLORS.muted, fontWeight: 500 }}>Manzil</span>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input value={value} onChange={(e) => onChange(e.target.value)} placeholder="GPS orqali aniqlang yoki qo'lda yozing" style={{ flex: 1, boxSizing: "border-box", background: COLORS.panel2, border: `1px solid ${COLORS.border}`, borderRadius: 8, padding: "11px 12px", color: COLORS.text, fontFamily: "Inter", fontSize: 13.5, outline: "none" }} />
+        <button onClick={detect} style={{ width: 44, borderRadius: 8, border: `1px solid ${COLORS.border}`, background: COLORS.panel2, color: COLORS.amber, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>{loading ? "…" : <MapPin size={16} />}</button>
+      </div>
+    </div>
+  );
+}
+function KmField({ label, value, onChange, lastKm, noValidate }) {
+  const invalid = !noValidate && value !== "" && num(value) < num(lastKm);
+  const delta = value !== "" ? num(value) - num(lastKm) : null;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <Field label={label} value={value} onChange={onChange} suffix="km" />
+      <div style={{ fontSize: 11, color: COLORS.muted }}>Oxirgi qayd etilgan: <b style={{ color: COLORS.text, fontFamily: "'Roboto Mono', monospace" }}>{fmt(lastKm)} km</b></div>
+      {!noValidate && delta !== null && !invalid && <div style={{ fontSize: 11.5, color: COLORS.green }}>Bosib o'tilgan masofa: {fmt(delta)} km</div>}
+      {invalid && <div style={{ display: "flex", gap: 6, alignItems: "center", background: COLORS.red + "18", borderRadius: 6, padding: "6px 8px" }}><AlertTriangle size={13} color={COLORS.red} /><span style={{ fontSize: 11, color: COLORS.red }}>Kiritilgan kilometraj avvalgi ko'rsatkichdan kichik. Iltimos, tekshiring.</span></div>}
+    </div>
+  );
+}
+function ModalShell({ title, subtitle, onClose, children }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "#000000AA", display: "flex", alignItems: "flex-end", zIndex: 50 }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: COLORS.panel, borderTop: `1px solid ${COLORS.border}`, borderRadius: "16px 16px 0 0", padding: "18px 18px calc(20px + env(safe-area-inset-bottom))", width: "100%", maxWidth: 480, margin: "0 auto", maxHeight: "88vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+          <div><div style={{ fontFamily: "Oswald", fontSize: 16, fontWeight: 600 }}>{title}</div>{subtitle && <div style={{ fontSize: 11.5, color: COLORS.muted, marginTop: 2 }}>{subtitle}</div>}</div>
+          <button onClick={onClose} style={{ background: COLORS.panel2, border: "none", borderRadius: "50%", width: 28, height: 28, color: COLORS.muted, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}><X size={15} /></button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+function Readout({ label, value, unit, tone = "green" }) {
+  const c = tone === "green" ? COLORS.green : tone === "red" ? COLORS.red : COLORS.amber;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      <span style={{ fontFamily: "Inter", fontSize: 11, color: COLORS.muted, letterSpacing: 0.4, textTransform: "uppercase" }}>{label}</span>
+      <div style={{ fontFamily: "'Roboto Mono', monospace", fontWeight: 700, fontSize: 22, color: c, textShadow: `0 0 14px ${c}55` }}>{value}{unit && <span style={{ fontSize: 12, color: COLORS.muted, marginLeft: 5, fontFamily: "Inter" }}>{unit}</span>}</div>
+    </div>
+  );
+}
+function RefBlock({ items }) {
+  return (
+    <div style={{ display: "flex", gap: 20, background: COLORS.panel2, borderRadius: 8, padding: "10px 12px", border: `1px solid ${COLORS.border}` }}>
+      {items.map((it) => (
+        <div key={it.label} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          <span style={{ fontFamily: "Inter", fontSize: 10, color: COLORS.muted, textTransform: "uppercase", letterSpacing: 0.3 }}>{it.label}</span>
+          <span style={{ fontFamily: "'Roboto Mono', monospace", fontWeight: 700, fontSize: 15, color: COLORS.text }}>{it.value} <span style={{ fontSize: 10.5, color: COLORS.muted, fontFamily: "Inter" }}>{it.unit}</span></span>
+        </div>
+      ))}
+    </div>
+  );
+}
+function PhotoGroup({ label, photos }) {
+  if (!photos || photos.length === 0) return null;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      {label && <span style={{ fontSize: 9.5, color: COLORS.muted }}>{label}</span>}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {photos.map((p, i) => { const url = photoUrl(p), comment = photoComment(p); return (
+          <div key={i} style={{ display: "flex", flexDirection: "column", gap: 3, width: 44 }}>
+            <img src={url} alt="" onClick={() => window.open(url, "_blank")} style={{ width: 44, height: 44, objectFit: "cover", borderRadius: 6, cursor: "pointer" }} />
+            {comment && <span style={{ fontSize: 8.5, color: COLORS.muted, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={comment}>{comment}</span>}
+          </div>
+        ); })}
+      </div>
+    </div>
+  );
+}
+function SectionLabel({ children }) { return <div style={{ fontFamily: "Oswald", fontSize: 12.5, fontWeight: 600, color: COLORS.amber, letterSpacing: 0.4, marginTop: 4 }}>{children}</div>; }
+
+// ---------------- Fayl guruhlash (kalendar kuni bo'yicha) ----------------
+function dayKeyOf(ts) { const d = new Date(ts); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }
+function computeFiles(history) {
+  const days = []; const byKey = {};
+  history.forEach((ev) => {
+    if (!["zagruzka", "zapravka", "vigruzka"].includes(ev.type)) return;
+    const key = dayKeyOf(ev.at);
+    if (!byKey[key]) { byKey[key] = { dayKey: key, dayLabel: new Date(ev.at).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric" }), zagruzkas: [], zapravkas: [], vigruzkas: [] }; days.push(byKey[key]); }
+    if (ev.type === "zagruzka") byKey[key].zagruzkas.push(ev);
+    if (ev.type === "zapravka") byKey[key].zapravkas.push(ev);
+    if (ev.type === "vigruzka") byKey[key].vigruzkas.push(ev);
+  });
+  return days;
+}
+
+// ---------------- Hosila holat (single source of truth = trip.history) ----------------
+function deriveTrip(trip) {
+  let km = trip.startKm, motoChas = trip.startMotoChas;
+  let tractorStartKm = trip.startKm, trailerStartMotoChas = trip.startMotoChas;
+  let curTractor = trip.tractorNumber, curTrailer = trip.trailerNumber;
+  const history = [];
+  for (const ev of trip.history) {
+    const item = { ...ev };
+    switch (ev.type) {
+      case "zagruzka": case "zapravka": { item.distance = num(ev.km) - km; km = num(ev.km); break; }
+      case "vigruzka": { item.distance = num(ev.km) - km; km = num(ev.km); item.motoChasWorked = num(ev.motoChas) - motoChas; motoChas = num(ev.motoChas); break; }
+      case "tractor_end": { item.distance = num(ev.km) - km; km = num(ev.km); break; }
+      case "tractor_confirmed": { km = num(ev.newKm); tractorStartKm = km; curTractor = ev.newTractorNumber; break; }
+      case "trailer_end": { item.distance = num(ev.km) - km; km = num(ev.km); curTrailer = null; break; }
+      case "trailer_confirmed": { motoChas = num(ev.motoChas); trailerStartMotoChas = motoChas; curTrailer = ev.newTrailerNumber; break; }
+      default: break;
+    }
+    history.push(item);
+  }
+  return { history, lastKm: km, lastMotoChas: motoChas, currentTractorStartKm: tractorStartKm, currentTrailerStartMotoChas: trailerStartMotoChas, tractorNumber: curTractor, trailerNumber: curTrailer };
+}
+function derivePending(history) {
+  let pendingTractorFinish = null, pendingTractorAccept = null, pendingTrailerFinish = null, pendingTrailerAccept = null;
+  for (const ev of history) {
+    if (ev.type === "tractor_end") pendingTractorFinish = { km: ev.km };
+    if (ev.type === "tractor_accepted") pendingTractorAccept = { newTractorNumber: ev.newTractorNumber, newKm: ev.newKm };
+    if (ev.type === "tractor_confirmed") { pendingTractorFinish = null; pendingTractorAccept = null; }
+    if (ev.type === "trailer_end") pendingTrailerFinish = { km: ev.km, motoChas: ev.motoChas, loadStatus: ev.loadStatus, photos: ev.photos };
+    if (ev.type === "trailer_accepted") pendingTrailerAccept = { newTrailerNumber: ev.newTrailerNumber, newKm: ev.km, motoChas: ev.motoChas, loadStatus: ev.loadStatus, photos: ev.photos };
+    if (ev.type === "trailer_confirmed") { pendingTrailerFinish = null; pendingTrailerAccept = null; }
+  }
+  return { pendingTractor: { finish: pendingTractorFinish, accept: pendingTractorAccept }, pendingTrailer: { finish: pendingTrailerFinish, accept: pendingTrailerAccept } };
+}
+
+// ---------------- Supabase bilan ishlash ----------------
+function rowToEvent(row) { return { id: row.id, type: row.type, at: new Date(row.at).getTime(), batchId: row.batch_id || null, ...row.data }; }
+async function fetchTripFull(tripId) {
+  const { data: tripRow } = await sb.from("trips").select("*").eq("id", tripId).single();
+  if (!tripRow) return null;
+  const { data: eventRows } = await sb.from("trip_events").select("*").eq("trip_id", tripId).order("at", { ascending: true });
+  const { data: sendRows } = await sb.from("trip_sends").select("*").eq("trip_id", tripId).order("batch_number", { ascending: true });
+  return {
+    id: tripRow.id, startedAt: new Date(tripRow.started_at).getTime(),
+    tractorNumber: tripRow.tractor_number, trailerNumber: tripRow.trailer_number,
+    startKm: Number(tripRow.start_km), startMotoChas: Number(tripRow.start_moto_chas),
+    motoChasPhoto: tripRow.moto_chas_photo,
+    completed: tripRow.completed,
+    history: (eventRows || []).map(rowToEvent),
+    sends: (sendRows || []).map((r) => ({ id: r.id, batchNumber: r.batch_number, sentAt: new Date(r.sent_at).getTime() })),
+  };
+}
+// Har bir jo'natishni alohida "partiya" sifatida matn ko'rinishida tayyorlaydi (nusxalash uchun)
+const BATCH_FIELDS = {
+  zagruzka: ["address", "km", "distance"],
+  zapravka: ["km", "distance", "tractorLiters", "trailerLiters", "adBlue"],
+  vigruzka: ["address", "km", "distance", "motoChas", "motoChasWorked"],
+};
+function formatFieldValue(f, v) {
+  if (f === "loadStatus") return LOAD_LABELS[v] || v;
+  if (f === "km" || f === "distance" || f === "newKm") return `${fmt(v)} km`;
+  if (f === "motoChas" || f === "motoChasWorked") return `${fmt(v)} soat`;
+  if (f.toLowerCase().includes("liters") || f === "adBlue") return `${fmt(v)} l`;
+  return v;
+}
+function buildBatchText(trip, driverLabel, events) {
+  const lines = [`YO'LDA — yuborilgan ma'lumotlar`, `Haydovchi: ${driverLabel}`, `Tyagach: ${trip.tractorNumber || ""}   Prisep: ${trip.trailerNumber || "YO'Q"}`, ""];
+  events.forEach((ev) => {
+    const label = ev.type === "zagruzka" ? "ZAGRUZKA" : ev.type === "zapravka" ? "ZAPRAVKA" : ev.type === "vigruzka" ? "VIGRUZKA" : (CHANGE_LABELS[ev.type] || ev.type);
+    lines.push(`[${label}] ${fmtDate(ev.at)}`);
+    const fields = BATCH_FIELDS[ev.type] || ["address", "km", "newKm", "motoChas", "loadStatus", "newTractorNumber", "newTrailerNumber"];
+    fields.forEach((f) => { if (ev[f] !== undefined && ev[f] !== null && ev[f] !== "") lines.push(`  ${FIELD_LABELS[f]}: ${formatFieldValue(f, ev[f])}`); });
+    lines.push("");
+  });
+  return lines.join("\n");
+}
+
+// ==================== APP ====================
+function App() {
+  const [local, setLocal] = useState(null);
+  const [trip, setTrip] = useState(null);
+  const [tab, setTab] = useState("main");
+  const [modal, setModal] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [errorMsg, setErrorMsg] = useState(null);
+  const busyRef = useRef(false); // guards against double-submit (double-tap) writing the same event twice
+
+  useEffect(() => {
+    (async () => {
+      const l = loadLocal();
+      setLocal(l);
+      if (l.activeTripId) { const t = await fetchTripFull(l.activeTripId); setTrip(t); }
+      setLoading(false);
+    })();
+  }, []);
+
+  function persistLocal(next) { setLocal(next); saveLocal(next); }
+  async function refreshTrip() { if (!local?.activeTripId) return; setTrip(await fetchTripFull(local.activeTripId)); }
+
+  async function saveDriver(driver) {
+    setErrorMsg(null);
+    const { data: drv } = await sb.from("drivers").select("id").eq("first_name", driver.firstName).eq("last_name", driver.lastName).maybeSingle();
+    if (drv) {
+      const { data: openTrip } = await sb.from("trips").select("id").eq("driver_id", drv.id).eq("completed", false).order("started_at", { ascending: false }).limit(1).maybeSingle();
+      if (openTrip) {
+        const t = await fetchTripFull(openTrip.id);
+        persistLocal({ driver, activeTripId: openTrip.id });
+        setTrip(t); setTab("main");
+        return;
+      }
+    }
+    persistLocal({ driver, activeTripId: null });
+  }
+
+  async function startTrip(data) {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setErrorMsg(null);
+    try {
+      const { data: tripId, error } = await sb.rpc("start_trip", {
+        p_driver_first: local.driver.firstName, p_driver_last: local.driver.lastName,
+        p_tractor_number: data.tractorNumber, p_trailer_number: data.trailerNumber,
+        p_start_km: num(data.startKm), p_start_moto_chas: num(data.motoChas), p_moto_chas_photo: data.motoChasPhoto,
+      });
+      if (error) throw error;
+      const t = await fetchTripFull(tripId);
+      persistLocal({ ...local, activeTripId: tripId });
+      setTrip(t); setModal(null); setTab("main");
+    } catch (err) {
+      setErrorMsg(err.message?.includes("TRACTOR_BUSY") ? "Bu tyagach hozir boshqa reysda band." : err.message?.includes("TRAILER_BUSY") ? "Bu prisep hozir boshqa reysda band." : "Xatolik: " + err.message);
+    } finally {
+      busyRef.current = false;
+    }
+  }
+
+  async function addEvent(type, data) {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    try {
+      // Yengil yangilash: faqat yangi yozuv qaytadi (eski rasmlar qayta yuklanmaydi)
+      const { data: row, error } = await sb.from("trip_events").insert({ trip_id: trip.id, type, data }).select("id,type,at,batch_id").single();
+      if (error) { setErrorMsg("Saqlashda xatolik: " + error.message); return; }
+      const ev = rowToEvent({ ...row, data });
+      setTrip((prev) => prev ? { ...prev, history: [...prev.history.filter((e) => e.id !== ev.id), ev].sort((a, b) => a.at - b.at) } : prev);
+      setModal(null);
+    } finally {
+      busyRef.current = false;
+    }
+  }
+
+  async function tractorFinish(data) {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    try {
+      const { error } = await sb.rpc("finish_tractor", { p_trip_id: trip.id, p_km: num(data.km), p_address: data.address });
+      if (error) { setErrorMsg(error.message); return; }
+      setModal(null); await refreshTrip();
+    } finally {
+      busyRef.current = false;
+    }
+  }
+  async function tractorAccept(data) {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    try {
+      const { error } = await sb.rpc("accept_tractor", { p_trip_id: trip.id, p_new_tractor_number: data.newTractorNumber, p_new_km: num(data.newKm), p_address: data.address });
+      if (error) throw error;
+      await refreshTrip();
+    } catch (err) { setErrorMsg(err.message?.includes("TRACTOR_BUSY") ? "Bu tyagach hozir band." : err.message); }
+    finally { busyRef.current = false; }
+  }
+  async function tractorConfirm() {
+    if (busyRef.current) return;
+    const pend = derivePending(trip.history).pendingTractor;
+    if (!pend.accept) return;
+    busyRef.current = true;
+    try {
+      const { error } = await sb.rpc("confirm_tractor", { p_trip_id: trip.id, p_new_tractor_number: pend.accept.newTractorNumber, p_new_km: pend.accept.newKm });
+      if (error) { setErrorMsg(error.message); return; }
+      setModal(null); await refreshTrip();
+    } finally {
+      busyRef.current = false;
+    }
+  }
+  async function trailerFinish(data) {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    try {
+      const { error } = await sb.rpc("finish_trailer", { p_trip_id: trip.id, p_km: num(data.km), p_address: data.address, p_moto_chas: num(data.motoChas), p_moto_chas_photo: data.motoChasPhoto, p_load_status: data.loadStatus, p_photos: data.photos });
+      if (error) { setErrorMsg(error.message); return; }
+      setModal(null); await refreshTrip();
+    } finally {
+      busyRef.current = false;
+    }
+  }
+  async function trailerAccept(data) {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    try {
+      const { error } = await sb.rpc("accept_trailer", { p_trip_id: trip.id, p_new_trailer_number: data.newTrailerNumber, p_new_km: num(data.newKm), p_address: data.address, p_moto_chas: num(data.motoChas), p_moto_chas_photo: data.motoChasPhoto, p_load_status: data.loadStatus, p_photos: data.photos });
+      if (error) throw error;
+      await refreshTrip();
+    } catch (err) { setErrorMsg(err.message?.includes("TRAILER_BUSY") ? "Bu prisep hozir band." : err.message); }
+    finally { busyRef.current = false; }
+  }
+  async function trailerConfirm() {
+    if (busyRef.current) return;
+    const pend = derivePending(trip.history).pendingTrailer;
+    if (!pend.accept) return;
+    busyRef.current = true;
+    try {
+      const { error } = await sb.rpc("confirm_trailer", { p_trip_id: trip.id, p_new_trailer_number: pend.accept.newTrailerNumber, p_moto_chas: pend.accept.motoChas });
+      if (error) { setErrorMsg(error.message); return; }
+      setModal(null); await refreshTrip();
+    } finally {
+      busyRef.current = false;
+    }
+  }
+
+  async function updateEvent(id, patch) {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    try {
+      const ev = trip.history.find((e) => e.id === id);
+      const { error } = await sb.from("trip_events").update({ data: { ...eventRawData(ev), ...patch } }).eq("id", id);
+      if (error) { setErrorMsg(error.message); return; }
+      setTrip((prev) => prev ? { ...prev, history: prev.history.map((e) => (e.id === id ? { ...e, ...patch } : e)) } : prev);
+    } finally {
+      busyRef.current = false;
+    }
+  }
+  async function sendAllFiles() {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    try {
+      const { data: pendingRows, error: e0 } = await sb.from("trip_events").select("id").eq("trip_id", trip.id).is("batch_id", null);
+      if (e0) { setErrorMsg(e0.message); return; }
+      if (!pendingRows || pendingRows.length === 0) return;
+      const { data: lastBatch } = await sb.from("trip_sends").select("batch_number").eq("trip_id", trip.id).order("batch_number", { ascending: false }).limit(1);
+      const nextNumber = (lastBatch && lastBatch[0] ? lastBatch[0].batch_number : 0) + 1;
+      const { data: newBatch, error: e1 } = await sb.from("trip_sends").insert({ trip_id: trip.id, batch_number: nextNumber }).select().single();
+      if (e1) { setErrorMsg(e1.message); return; }
+      const { error: e2 } = await sb.from("trip_events").update({ batch_id: newBatch.id }).in("id", pendingRows.map((r) => r.id));
+      if (e2) { setErrorMsg(e2.message); return; }
+      const sentIds = new Set(pendingRows.map((r) => r.id));
+      const newSend = { id: newBatch.id, batchNumber: newBatch.batch_number, sentAt: new Date(newBatch.sent_at).getTime() };
+      setTrip((prev) => prev ? { ...prev, history: prev.history.map((e) => (sentIds.has(e.id) ? { ...e, batchId: newBatch.id } : e)), sends: [...prev.sends, newSend] } : prev);
+    } finally {
+      busyRef.current = false;
+    }
+  }
+  async function resetTrip() {
+    await sb.rpc("end_trip", { p_trip_id: trip.id });
+    persistLocal({ ...local, activeTripId: null });
+    setTrip(null); setModal(null); setTab("main");
+  }
+
+  if (loading) {
+    return <div style={{ background: COLORS.bg, minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: COLORS.muted, fontFamily: "Inter" }}><style>{FONT_IMPORT}</style>yuklanmoqda...</div>;
+  }
+
+  const viewTrip = trip ? { ...trip, ...deriveTrip(trip), ...derivePending(trip.history) } : null;
+
+  return (
+    <div style={{ background: COLORS.bg, minHeight: "100vh", fontFamily: "Inter", color: COLORS.text, paddingBottom: trip ? 84 : 0 }}>
+      <style>{FONT_IMPORT}</style>
+      <div style={{ padding: "20px 18px 14px", borderBottom: `1px solid ${COLORS.border}` }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 34, height: 34, borderRadius: 8, background: COLORS.amber, display: "flex", alignItems: "center", justifyContent: "center" }}><Truck size={19} color="#1A1300" /></div>
+          <div><div style={{ fontFamily: "Oswald", fontWeight: 700, fontSize: 19, letterSpacing: 0.5 }}>YO'LDA</div><div style={{ fontSize: 11, color: COLORS.muted, marginTop: -2 }}>reys va yoqilg'i nazorati</div></div>
+        </div>
+      </div>
+
+      {errorMsg && (
+        <div style={{ background: COLORS.red + "22", border: `1px solid ${COLORS.red}55`, color: COLORS.red, padding: "10px 14px", margin: "12px 16px 0", borderRadius: 8, fontSize: 12.5, display: "flex", justifyContent: "space-between", gap: 10, maxWidth: 480, marginLeft: "auto", marginRight: "auto" }}>
+          <span>{errorMsg}</span>
+          <button onClick={() => setErrorMsg(null)} style={{ background: "transparent", border: "none", color: COLORS.red, cursor: "pointer", flexShrink: 0 }}><X size={14} /></button>
+        </div>
+      )}
+
+      <div style={{ maxWidth: 480, margin: "0 auto", padding: "16px 16px 0" }}>
+        {!local.driver ? <ProfileSetup onSave={saveDriver} />
+          : !trip ? <StartTripForm driver={local.driver} onStart={startTrip} />
+          : tab === "main" ? <MainScreen trip={viewTrip} onOpen={setModal} />
+          : tab === "files" ? <FilesTab trip={viewTrip} driverLabel={`${local.driver.firstName} ${local.driver.lastName}`} onUpdateEvent={updateEvent} onSendAll={sendAllFiles} />
+          : <ProfilTab driver={local.driver} trip={viewTrip} onReset={resetTrip} />}
+      </div>
+
+      {modal === "zagruzka" && viewTrip.trailerNumber && <ZagruzkaModal trip={viewTrip} onClose={() => setModal(null)} onSubmit={(d) => addEvent("zagruzka", d)} />}
+      {modal === "zapravka" && <ZapravkaModal trip={viewTrip} onClose={() => setModal(null)} onSubmit={(d) => addEvent("zapravka", d)} />}
+      {modal === "vigruzka" && viewTrip.trailerNumber && <VigruzkaModal trip={viewTrip} onClose={() => setModal(null)} onSubmit={(d) => addEvent("vigruzka", d)} />}
+      {modal === "zamenit" && (
+        <ZamenitModal trip={viewTrip} onClose={() => setModal(null)} tractorFinish={tractorFinish} tractorAccept={tractorAccept} tractorConfirm={tractorConfirm} trailerFinish={trailerFinish} trailerAccept={trailerAccept} trailerConfirm={trailerConfirm} />
+      )}
+
+      {trip && (
+        <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: COLORS.panel, borderTop: `1px solid ${COLORS.border}`, display: "flex", padding: "8px 10px calc(8px + env(safe-area-inset-bottom))", gap: 6 }}>
+          <TabBtn label="Asosiy" icon={Gauge} active={tab === "main"} onClick={() => setTab("main")} />
+          <TabBtn label="Fayllar" icon={HistoryIcon} active={tab === "files"} onClick={() => setTab("files")} />
+          <TabBtn label="Profil" icon={User} active={tab === "profil"} onClick={() => setTab("profil")} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TabBtn({ label, icon: IconC, active, onClick }) {
+  return <button onClick={onClick} style={{ flex: 1, background: "transparent", border: "none", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, padding: "6px 0", color: active ? COLORS.amber : COLORS.muted, cursor: "pointer" }}><IconC size={19} /><span style={{ fontSize: 10.5, fontFamily: "Inter", fontWeight: 600 }}>{label}</span></button>;
+}
+
+// ---------------- Ekranlar ----------------
+function ProfileSetup({ onSave }) {
+  const [firstName, setFirstName] = useState(""); const [lastName, setLastName] = useState(""); const [checking, setChecking] = useState(false);
+  async function submit() { setChecking(true); await onSave({ firstName, lastName }); setChecking(false); }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <Panel style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ fontFamily: "Oswald", fontSize: 15, fontWeight: 600 }}>Haydovchi profili</div>
+        <Field label="Ism" type="text" value={firstName} onChange={setFirstName} />
+        <Field label="Familiya" type="text" value={lastName} onChange={setLastName} />
+      </Panel>
+      <Btn full disabled={!firstName || !lastName || checking} onClick={submit} icon={Check}>{checking ? "Tekshirilmoqda..." : "Davom etish"}</Btn>
+    </div>
+  );
+}
+function StartTripForm({ driver, onStart }) {
+  const [tractorNumber, setTractorNumber] = useState(""); const [trailerNumber, setTrailerNumber] = useState("");
+  const [motoChas, setMotoChas] = useState(""); const [motoChasPhoto, setMotoChasPhoto] = useState(null); const [startKm, setStartKm] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const valid = tractorNumber && trailerNumber && motoChas !== "" && motoChasPhoto && startKm !== "" && !submitting;
+  async function submit() { setSubmitting(true); await onStart({ tractorNumber, trailerNumber, motoChas, motoChasPhoto, startKm }); setSubmitting(false); }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <Panel style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ fontFamily: "Oswald", fontSize: 15, fontWeight: 600 }}>Reysni boshlash</div>
+        <div style={{ fontSize: 12, color: COLORS.muted }}>Haydovchi: {driver.firstName} {driver.lastName}</div>
+        <Field label="Tyagach raqami" type="text" value={tractorNumber} onChange={setTractorNumber} placeholder="masalan: MHE 704" />
+        <Field label="Prisep raqami" type="text" value={trailerNumber} onChange={setTrailerNumber} placeholder="masalan: CO529" />
+        <Field label="Moto-soat (prisep)" value={motoChas} onChange={setMotoChas} suffix="soat" />
+        {motoChas !== "" && <PhotoPicker label="Motochas ko'rsatkichi rasmi" photo={motoChasPhoto} onPick={setMotoChasPhoto} onClear={() => setMotoChasPhoto(null)} required />}
+        <Field label="Boshlang'ich km (tyagach spidometri)" value={startKm} onChange={setStartKm} suffix="km" />
+      </Panel>
+      <Btn full disabled={!valid} onClick={submit} icon={Check}>{submitting ? "Boshlanmoqda..." : "BOSHLASH"}</Btn>
+    </div>
+  );
+}
+function MainScreen({ trip, onOpen }) {
+  const recent = [...trip.history].slice(-5).reverse();
+  const labels = { zagruzka: "Zagruzka", zapravka: "Zapravka", vigruzka: "Vigruzka", tractor_end: "Tyagach yakunlandi", tractor_accepted: "Yangi tyagach qabul qilindi", tractor_confirmed: "Tyagach almashinuvi tasdiqlandi", trailer_end: "Prisep yakunlandi", trailer_accepted: "Yangi prisep qabul qilindi", trailer_confirmed: "Prisep almashinuvi tasdiqlandi" };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {!trip.trailerNumber && <Panel style={{ display: "flex", gap: 10, alignItems: "center", borderColor: COLORS.red + "55" }}><AlertTriangle size={16} color={COLORS.red} style={{ flexShrink: 0 }} /><div style={{ fontSize: 12, color: COLORS.text }}>Hozir prisep biriktirilmagan. Yangi prisepni "ZAMENIT" orqali qabul qiling va tasdiqlang.</div></Panel>}
+      <Panel>
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 14 }}>
+          <div><div style={{ fontSize: 10.5, color: COLORS.muted, letterSpacing: 0.5 }}>TYAGACH</div><div style={{ fontFamily: "Oswald", fontSize: 18, fontWeight: 700 }}>{trip.tractorNumber}</div></div>
+          <div style={{ textAlign: "right" }}><div style={{ fontSize: 10.5, color: COLORS.muted, letterSpacing: 0.5 }}>PRISEP</div><div style={{ fontFamily: "Oswald", fontSize: 18, fontWeight: 700, color: trip.trailerNumber ? COLORS.text : COLORS.red }}>{trip.trailerNumber || "PRISEPSIZ"}</div></div>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}><Readout label="Joriy km" value={fmt(trip.lastKm)} unit="km" /><Readout label="Moto-soat" value={fmt(trip.lastMotoChas)} unit="soat" tone="amber" /></div>
+      </Panel>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <ActionBtn icon={Package} label="ZAGRUZKA" onClick={() => onOpen("zagruzka")} disabled={!trip.trailerNumber} />
+        <ActionBtn icon={PackageCheck} label="VIGRUZKA" onClick={() => onOpen("vigruzka")} disabled={!trip.trailerNumber} />
+        <ActionBtn icon={Fuel} label="ZAPRAVKA" onClick={() => onOpen("zapravka")} />
+        <ActionBtn icon={Repeat} label="ZAMENIT" onClick={() => onOpen("zamenit")} />
+      </div>
+      {recent.length > 0 && (
+        <Panel>
+          <div style={{ fontFamily: "Oswald", fontSize: 14, fontWeight: 600, marginBottom: 10 }}>So'nggi harakatlar</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>{recent.map((ev) => <div key={ev.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5 }}><span>{labels[ev.type] || ev.type}</span><span style={{ color: COLORS.muted }}>{fmtDate(ev.at)}</span></div>)}</div>
+        </Panel>
+      )}
+    </div>
+  );
+}
+function ActionBtn({ icon: IconC, label, onClick, disabled }) {
+  return (
+    <button onClick={disabled ? undefined : onClick} disabled={disabled} style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: "22px 10px", display: "flex", flexDirection: "column", alignItems: "center", gap: 10, cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.4 : 1 }}>
+      <div style={{ width: 42, height: 42, borderRadius: 10, background: COLORS.amber + "1A", display: "flex", alignItems: "center", justifyContent: "center" }}><IconC size={21} color={COLORS.amber} /></div>
+      <span style={{ fontFamily: "Oswald", fontSize: 13, fontWeight: 600, letterSpacing: 0.5, color: COLORS.text }}>{label}</span>
+    </button>
+  );
+}
+
+// ---------------- Amal oynalari ----------------
+function ZagruzkaModal({ trip, onClose, onSubmit }) {
+  const [km, setKm] = useState(""); const [address, setAddress] = useState(""); const [photos, setPhotos] = useState([]);
+  const valid = km !== "" && num(km) >= num(trip.lastKm) && address && photos.length > 0;
+  return (
+    <ModalShell title="Zagruzka" subtitle={`Tyagach: ${trip.tractorNumber}`} onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <RefBlock items={[{ label: "Oxirgi moto-soat", value: fmt(trip.lastMotoChas), unit: "soat" }, { label: "Oxirgi kilometraj", value: fmt(trip.lastKm), unit: "km" }]} />
+        <KmField label="Hozirgi km" value={km} onChange={setKm} lastKm={trip.lastKm} />
+        <AddressPicker value={address} onChange={setAddress} />
+        <MultiPhotoPicker label="Yuk hujjatlari fotosi" photos={photos} onChange={setPhotos} required allowComment />
+        <Btn full disabled={!valid} onClick={() => onSubmit({ km, address, photos })} icon={Check}>Saqlash</Btn>
+      </div>
+    </ModalShell>
+  );
+}
+function ZapravkaModal({ trip, onClose, onSubmit }) {
+  const hasTrailer = !!trip.trailerNumber;
+  const [km, setKm] = useState(""); const [tractorLiters, setTractorLiters] = useState(""); const [tractorDieselPhotos, setTractorDieselPhotos] = useState([]);
+  const [trailerLiters, setTrailerLiters] = useState(""); const [trailerDieselPhotos, setTrailerDieselPhotos] = useState([]);
+  const [adBlue, setAdBlue] = useState(""); const [adBluePhotos, setAdBluePhotos] = useState([]);
+  const hasTractorDiesel = tractorLiters !== ""; const hasTrailerDiesel = hasTrailer && trailerLiters !== ""; const hasAdBlue = adBlue !== "";
+  const validKm = km !== "" && num(km) >= num(trip.lastKm);
+  const valid = validKm && (hasTractorDiesel || hasTrailerDiesel || hasAdBlue) && (!hasTractorDiesel || tractorDieselPhotos.length > 0) && (!hasTrailerDiesel || trailerDieselPhotos.length > 0) && (!hasAdBlue || adBluePhotos.length > 0);
+  return (
+    <ModalShell title="Zapravka" subtitle={`Tyagach: ${trip.tractorNumber}${hasTrailer ? ` / Prisep: ${trip.trailerNumber}` : " / PRISEPSIZ"}`} onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <KmField label="Zapravkagacha km" value={km} onChange={setKm} lastKm={trip.lastKm} />
+        <SectionLabel>TYAGACH SALYARKASI</SectionLabel>
+        <Field label="Tyagachga quyilgan diesel" value={tractorLiters} onChange={setTractorLiters} suffix="litr" />
+        <MultiPhotoPicker label="Tyagach cheki (xohlagancha rasm)" photos={tractorDieselPhotos} onChange={setTractorDieselPhotos} required={hasTractorDiesel} allowComment />
+        {hasTrailer ? (
+          <>
+            <SectionLabel>PRISEP SALYARKASI</SectionLabel>
+            <Field label="Prisepga (refga) quyilgan diesel" value={trailerLiters} onChange={setTrailerLiters} suffix="litr" />
+            <MultiPhotoPicker label="Prisep cheki (xohlagancha rasm)" photos={trailerDieselPhotos} onChange={setTrailerDieselPhotos} required={hasTrailerDiesel} allowComment />
+          </>
+        ) : (
+          <div style={{ display: "flex", gap: 8, alignItems: "center", background: COLORS.panel2, borderRadius: 8, padding: "8px 10px" }}><AlertTriangle size={13} color={COLORS.muted} /><span style={{ fontSize: 11, color: COLORS.muted }}>Hozir prisep biriktirilmagan — prisep salyarkasi kiritilmaydi.</span></div>
+        )}
+        <SectionLabel>ADBLUE</SectionLabel>
+        <Field label="AdBlue" value={adBlue} onChange={setAdBlue} suffix="litr" />
+        <MultiPhotoPicker label="AdBlue cheki (xohlagancha rasm)" photos={adBluePhotos} onChange={setAdBluePhotos} required={hasAdBlue} allowComment />
+        <Btn full disabled={!valid} onClick={() => onSubmit({ km, tractorLiters, tractorDieselPhotos, trailerLiters: hasTrailer ? trailerLiters : "", trailerDieselPhotos: hasTrailer ? trailerDieselPhotos : [], adBlue, adBluePhotos })} icon={Check}>Saqlash</Btn>
+      </div>
+    </ModalShell>
+  );
+}
+function VigruzkaModal({ trip, onClose, onSubmit }) {
+  const [km, setKm] = useState(""); const [address, setAddress] = useState(""); const [motoChas, setMotoChas] = useState(""); const [motoChasPhoto, setMotoChasPhoto] = useState(null); const [photos, setPhotos] = useState([]);
+  const validKm = km !== "" && num(km) >= num(trip.lastKm);
+  const validMoto = motoChas !== "" && num(motoChas) >= num(trip.lastMotoChas);
+  const valid = validKm && validMoto && motoChasPhoto && address && photos.length > 0;
+  const worked = motoChas !== "" ? num(motoChas) - num(trip.lastMotoChas) : null;
+  return (
+    <ModalShell title="Vigruzka" subtitle={`Tyagach: ${trip.tractorNumber}`} onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <KmField label="Hozirgi km" value={km} onChange={setKm} lastKm={trip.lastKm} />
+        <AddressPicker value={address} onChange={setAddress} />
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <Field label="Prisep motochasi (hozirgi)" value={motoChas} onChange={setMotoChas} suffix="soat" />
+          <div style={{ fontSize: 11, color: COLORS.muted }}>Oxirgi qayd: <b style={{ color: COLORS.text, fontFamily: "'Roboto Mono', monospace" }}>{fmt(trip.lastMotoChas)} soat</b></div>
+          {worked !== null && worked >= 0 && <div style={{ fontSize: 11.5, color: COLORS.green }}>Ishlagan: {fmt(worked)} soat</div>}
+          {worked !== null && worked < 0 && <div style={{ display: "flex", gap: 6, alignItems: "center", background: COLORS.red + "18", borderRadius: 6, padding: "6px 8px" }}><AlertTriangle size={13} color={COLORS.red} /><span style={{ fontSize: 11, color: COLORS.red }}>Motochas oxirgi ko'rsatkichdan kichik bo'lishi mumkin emas.</span></div>}
+        </div>
+        {motoChas !== "" && <PhotoPicker label="Motochas ko'rsatkichi rasmi" photo={motoChasPhoto} onPick={setMotoChasPhoto} onClear={() => setMotoChasPhoto(null)} required allowComment />}
+        <MultiPhotoPicker label="Tushirish hujjati fotosi" photos={photos} onChange={setPhotos} required allowComment />
+        <Btn full disabled={!valid} onClick={() => onSubmit({ km, address, motoChas, motoChasPhoto, photos })} icon={Check}>Saqlash</Btn>
+      </div>
+    </ModalShell>
+  );
+}
+function ZamenitModal({ trip, onClose, tractorFinish, tractorAccept, tractorConfirm, trailerFinish, trailerAccept, trailerConfirm }) {
+  const [activeForm, setActiveForm] = useState(null);
+  if (activeForm === "tractor_finish") return <TractorEndForm trip={trip} onBack={() => setActiveForm(null)} onClose={onClose} onSubmit={(d) => { tractorFinish(d); setActiveForm(null); }} />;
+  if (activeForm === "tractor_accept") return <TractorAcceptForm trip={trip} onBack={() => setActiveForm(null)} onClose={onClose} onSubmit={(d) => { tractorAccept(d); setActiveForm(null); }} />;
+  if (activeForm === "trailer_finish") return <TrailerEndForm trip={trip} onBack={() => setActiveForm(null)} onClose={onClose} onSubmit={(d) => { trailerFinish(d); setActiveForm(null); }} />;
+  if (activeForm === "trailer_accept") return <TrailerAcceptForm trip={trip} onBack={() => setActiveForm(null)} onClose={onClose} onSubmit={(d) => { trailerAccept(d); setActiveForm(null); }} />;
+  return (
+    <ModalShell title="Zamenit" subtitle="Har bir bosqich alohida: yakunlash → qabul qilish → tasdiqlash" onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <ReplacementStatusBlock title="TYAGACH" icon={Truck} current={trip.tractorNumber} pending={trip.pendingTractor} onFinish={() => setActiveForm("tractor_finish")} onAccept={() => setActiveForm("tractor_accept")} onConfirm={tractorConfirm} newNumberKey="newTractorNumber" />
+        <ReplacementStatusBlock title="PRISEP" icon={Package} current={trip.trailerNumber} noneLabel="PRISEPSIZ" pending={trip.pendingTrailer} onFinish={() => setActiveForm("trailer_finish")} onAccept={() => setActiveForm("trailer_accept")} onConfirm={trailerConfirm} newNumberKey="newTrailerNumber" />
+      </div>
+    </ModalShell>
+  );
+}
+function ReplacementStatusBlock({ title, icon: IconC, current, pending, onFinish, onAccept, onConfirm, newNumberKey, noneLabel = "YO'Q" }) {
+  const stage = !pending.finish ? "before_finish" : !pending.accept ? "after_finish" : "ready_confirm";
+  return (
+    <div style={{ background: COLORS.panel2, border: `1px solid ${COLORS.border}`, borderRadius: 10, padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}><IconC size={16} color={COLORS.amber} /><span style={{ fontFamily: "Oswald", fontSize: 13.5, fontWeight: 600 }}>{title}</span><span style={{ marginLeft: "auto", fontFamily: "'Roboto Mono', monospace", fontSize: 13, color: current ? COLORS.text : COLORS.red }}>{current || noneLabel}</span></div>
+      {stage === "before_finish" && <Btn variant="ghost" full onClick={onFinish}>{title}NI YAKUNLASH</Btn>}
+      {stage === "after_finish" && (<><div style={{ fontSize: 11.5, color: COLORS.muted, lineHeight: 1.5 }}>Eski {title.toLowerCase()} yakunlandi. Yangisini hozir yoki keyinroq qabul qilishingiz mumkin.</div><Btn variant="ghost" full onClick={onAccept}>YANGI {title}NI QABUL QILISH</Btn></>)}
+      {stage === "ready_confirm" && (<><div style={{ fontSize: 11.5, color: COLORS.green, lineHeight: 1.5 }}>Yangi {title.toLowerCase()} qabul qilindi: <b>{pending.accept[newNumberKey]}</b>. Tasdiqlagandan so'ng u profilda faol bo'ladi.</div><Btn full onClick={onConfirm} icon={Check}>TASDIQLASH</Btn></>)}
+    </div>
+  );
+}
+function TractorEndForm({ trip, onBack, onClose, onSubmit }) {
+  const [km, setKm] = useState(""); const [address, setAddress] = useState("");
+  const valid = km !== "" && num(km) >= num(trip.lastKm) && address;
+  return (
+    <ModalShell title="Tyagachni yakunlash" subtitle={`Joriy: ${trip.tractorNumber}`} onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <KmField label="Yakuniy umumiy km" value={km} onChange={setKm} lastKm={trip.lastKm} />
+        <AddressPicker value={address} onChange={setAddress} />
+        <div style={{ display: "flex", gap: 10 }}><Btn variant="ghost" onClick={onBack} icon={ChevronLeft}>Orqaga</Btn><Btn full disabled={!valid} onClick={() => onSubmit({ km, address })} icon={Check}>Yakunlash</Btn></div>
+      </div>
+    </ModalShell>
+  );
+}
+function TractorAcceptForm({ trip, onBack, onClose, onSubmit }) {
+  const [newTractorNumber, setNewTractorNumber] = useState(""); const [newKm, setNewKm] = useState(""); const [address, setAddress] = useState("");
+  const valid = newTractorNumber && newKm !== "" && address;
+  return (
+    <ModalShell title="Yangi tyagachni qabul qilish" onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <Field label="Yangi tyagach raqami" type="text" value={newTractorNumber} onChange={setNewTractorNumber} />
+        <Field label="Yangi tyagachning hozirgi km" value={newKm} onChange={setNewKm} suffix="km" />
+        <AddressPicker value={address} onChange={setAddress} />
+        <div style={{ fontSize: 11, color: COLORS.muted }}>Bu boshqa transport vositasi bo'lgani uchun km hisoblanishi shu ko'rsatkichdan qaytadan boshlanadi. Profilga faol bo'lishi uchun keyin alohida TASDIQLASH kerak.</div>
+        <div style={{ display: "flex", gap: 10 }}><Btn variant="ghost" onClick={onBack} icon={ChevronLeft}>Orqaga</Btn><Btn full disabled={!valid} onClick={() => onSubmit({ newTractorNumber, newKm, address })} icon={Check}>Qabul qilish</Btn></div>
+      </div>
+    </ModalShell>
+  );
+}
+function LoadStatusFields({ loadStatus, setLoadStatus, zamokPhoto, setZamokPhoto, dokPhoto, setDokPhoto }) {
+  return (
+    <>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}><span style={{ fontFamily: "Inter", fontSize: 12.5, color: COLORS.muted, fontWeight: 500 }}>Yuk holati</span><SegmentedChoice options={[{ id: "S_GRUZ", label: "S GRUZ" }, { id: "BEZ_GRUZ", label: "BEZ GRUZ" }]} value={loadStatus} onChange={setLoadStatus} /></div>
+      {loadStatus === "S_GRUZ" && <div style={{ display: "flex", gap: 12 }}><PhotoPicker label="Zamok rasmi" photo={zamokPhoto} onPick={setZamokPhoto} onClear={() => setZamokPhoto(null)} required allowComment /><PhotoPicker label="Hujjat rasmi" photo={dokPhoto} onPick={setDokPhoto} onClear={() => setDokPhoto(null)} required allowComment /></div>}
+    </>
+  );
+}
+function TrailerEndForm({ trip, onBack, onClose, onSubmit }) {
+  const [km, setKm] = useState(""); const [address, setAddress] = useState(""); const [motoChas, setMotoChas] = useState(""); const [motoChasPhoto, setMotoChasPhoto] = useState(null);
+  const [loadStatus, setLoadStatus] = useState("BEZ_GRUZ"); const [zamokPhoto, setZamokPhoto] = useState(null); const [dokPhoto, setDokPhoto] = useState(null);
+  const validKm = km !== "" && num(km) >= num(trip.lastKm); const validMoto = motoChas !== "" && num(motoChas) >= num(trip.lastMotoChas); const validLoad = loadStatus === "BEZ_GRUZ" || (zamokPhoto && dokPhoto);
+  const valid = validKm && address && validMoto && motoChasPhoto && validLoad;
+  return (
+    <ModalShell title="Prisepni yakunlash" subtitle={`Joriy: ${trip.trailerNumber}`} onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <KmField label="Yakuniy umumiy km" value={km} onChange={setKm} lastKm={trip.lastKm} />
+        <AddressPicker value={address} onChange={setAddress} />
+        <Field label="Yakuniy motochas" value={motoChas} onChange={setMotoChas} suffix="soat" hint={`Oxirgi qayd: ${fmt(trip.lastMotoChas)} soat`} />
+        {motoChas !== "" && <PhotoPicker label="Motochas ko'rsatkichi rasmi" photo={motoChasPhoto} onPick={setMotoChasPhoto} onClear={() => setMotoChasPhoto(null)} required allowComment />}
+        <LoadStatusFields loadStatus={loadStatus} setLoadStatus={setLoadStatus} zamokPhoto={zamokPhoto} setZamokPhoto={setZamokPhoto} dokPhoto={dokPhoto} setDokPhoto={setDokPhoto} />
+        <div style={{ fontSize: 11, color: COLORS.muted }}>Yakunlangandan keyin profilda "PRISEPSIZ" ko'rinadi.</div>
+        <div style={{ display: "flex", gap: 10 }}><Btn variant="ghost" onClick={onBack} icon={ChevronLeft}>Orqaga</Btn><Btn full disabled={!valid} onClick={() => onSubmit({ km, address, motoChas, motoChasPhoto, loadStatus, photos: [zamokPhoto, dokPhoto].filter(Boolean) })} icon={Check}>Yakunlash</Btn></div>
+      </div>
+    </ModalShell>
+  );
+}
+function TrailerAcceptForm({ trip, onBack, onClose, onSubmit }) {
+  const [newTrailerNumber, setNewTrailerNumber] = useState(""); const [newKm, setNewKm] = useState(""); const [address, setAddress] = useState("");
+  const [newMotoChas, setNewMotoChas] = useState(""); const [motoChasPhoto, setMotoChasPhoto] = useState(null);
+  const [loadStatus, setLoadStatus] = useState("BEZ_GRUZ"); const [zamokPhoto, setZamokPhoto] = useState(null); const [dokPhoto, setDokPhoto] = useState(null);
+  const [confirming, setConfirming] = useState(false);
+  const validKm = newKm !== "" && num(newKm) >= num(trip.lastKm); const validLoad = loadStatus === "BEZ_GRUZ" || (zamokPhoto && dokPhoto);
+  const valid = newTrailerNumber && validKm && address && newMotoChas !== "" && motoChasPhoto && validLoad;
+  if (confirming) {
+    return (
+      <ModalShell title="Tasdiqlash" onClose={onClose}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ fontSize: 13.5, color: COLORS.text, lineHeight: 1.6 }}><b>{newTrailerNumber}</b> prisepini qabul qilishni tasdiqlaysizmi?</div>
+          <div style={{ display: "flex", gap: 10 }}><Btn variant="ghost" full onClick={() => setConfirming(false)}>Bekor qilish</Btn><Btn full onClick={() => onSubmit({ newTrailerNumber, newKm, address, motoChas: newMotoChas, motoChasPhoto, loadStatus, photos: [zamokPhoto, dokPhoto].filter(Boolean) })} icon={Check}>Ha, tasdiqlash</Btn></div>
+        </div>
+      </ModalShell>
+    );
+  }
+  return (
+    <ModalShell title="Yangi prisepni qabul qilish" onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <Field label="Yangi prisep raqami" type="text" value={newTrailerNumber} onChange={setNewTrailerNumber} />
+        <KmField label="Hozirgi umumiy km" value={newKm} onChange={setNewKm} lastKm={trip.lastKm} />
+        <AddressPicker value={address} onChange={setAddress} />
+        <Field label="Yangi prisep motochasi" value={newMotoChas} onChange={setNewMotoChas} suffix="soat" hint="Yangi prisep uchun hisob shu ko'rsatkichdan qaytadan boshlanadi" />
+        {newMotoChas !== "" && <PhotoPicker label="Motochas ko'rsatkichi rasmi" photo={motoChasPhoto} onPick={setMotoChasPhoto} onClear={() => setMotoChasPhoto(null)} required allowComment />}
+        <LoadStatusFields loadStatus={loadStatus} setLoadStatus={setLoadStatus} zamokPhoto={zamokPhoto} setZamokPhoto={setZamokPhoto} dokPhoto={dokPhoto} setDokPhoto={setDokPhoto} />
+        <div style={{ fontSize: 11, color: COLORS.muted }}>Qabul qilingandan keyin ham profilda hali eski holat turadi — faollashishi uchun alohida TASDIQLASH kerak.</div>
+        <div style={{ display: "flex", gap: 10 }}><Btn variant="ghost" onClick={onBack} icon={ChevronLeft}>Orqaga</Btn><Btn full disabled={!valid} onClick={() => setConfirming(true)} icon={Check}>Qabul qilish</Btn></div>
+      </div>
+    </ModalShell>
+  );
+}
+
+// ---------------- Fayllar ----------------
+const CHANGE_LABELS = { tractor_end: "Tyagach yakunlandi", tractor_accepted: "Yangi tyagach qabul qilindi", tractor_confirmed: "Tyagach almashinuvi tasdiqlandi", trailer_end: "Prisep yakunlandi", trailer_accepted: "Yangi prisep qabul qilindi", trailer_confirmed: "Prisep almashinuvi tasdiqlandi" };
+const EDITABLE_TYPES = ["zagruzka", "zapravka", "vigruzka"];
+function batchEventsFor(history, batchId) {
+  return history.filter((e) => e.batchId === batchId).sort((a, b) => a.at - b.at);
+}
+function FilesTab({ trip, driverLabel, onUpdateEvent, onSendAll }) {
+  const [subTab, setSubTab] = useState("active"); const [openId, setOpenId] = useState(null); const [editingEvent, setEditingEvent] = useState(null); const [sendStep, setSendStep] = useState(null); const [copiedId, setCopiedId] = useState(null);
+  const pendingHistory = trip.history.filter((e) => !e.batchId);
+  const pendingFiles = computeFiles(pendingHistory);
+  const pendingChanges = pendingHistory.filter((e) => e.type in CHANGE_LABELS);
+  const hasPending = pendingHistory.length > 0;
+
+  function renderFileEvents(f, editable) {
+    return (<>
+      {f.zagruzkas.map((z) => <EventDetail key={z.id} label="ZAGRUZKA" ev={z} fields={["address", "km", "distance"]} editable={editable} onEdit={() => setEditingEvent(z)} />)}
+      {f.zapravkas.map((z) => <EventDetail key={z.id} label="ZAPRAVKA" ev={z} fields={["km", "distance", "tractorLiters", "trailerLiters", "adBlue"]} editable={editable} onEdit={() => setEditingEvent(z)} />)}
+      {f.vigruzkas.map((z) => <EventDetail key={z.id} label="VIGRUZKA" ev={z} fields={["address", "km", "distance", "motoChas", "motoChasWorked"]} editable={editable} onEdit={() => setEditingEvent(z)} />)}
+    </>);
+  }
+
+  async function copyBatch(batch, events) {
+    const text = buildBatchText(trip, driverLabel, events);
+    try { await navigator.clipboard.writeText(text); setCopiedId(batch.id); setTimeout(() => setCopiedId(null), 1500); } catch {}
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ display: "flex", gap: 8 }}><SegmentedChoice options={[{ id: "active", label: "Faol" }, { id: "archive", label: "🔒 Jo'natilgan" }]} value={subTab} onChange={setSubTab} /></div>
+
+      {subTab === "active" && (
+        <>
+          {pendingFiles.length === 0 && pendingChanges.length === 0 && <Panel style={{ textAlign: "center", padding: "30px 20px", color: COLORS.muted, fontSize: 13 }}>Hali yuborilmagan fayl yo'q</Panel>}
+          {pendingFiles.map((f) => {
+            const key = `p-${f.dayKey}`; const isOpen = openId === key;
+            return (
+              <Panel key={key} style={{ padding: 0, overflow: "hidden" }}>
+                <button onClick={() => setOpenId(isOpen ? null : key)} style={{ width: "100%", background: "transparent", border: "none", padding: 16, display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", color: COLORS.text }}>
+                  <div style={{ textAlign: "left" }}><div style={{ fontFamily: "Oswald", fontSize: 14.5, fontWeight: 600 }}>FAYL — {f.dayLabel}</div><div style={{ fontSize: 11, color: COLORS.muted, marginTop: 2 }}>{[f.zagruzkas.length > 0 && `Zagruzka ×${f.zagruzkas.length}`, f.zapravkas.length > 0 && `Zapravka ×${f.zapravkas.length}`, f.vigruzkas.length > 0 && `Vigruzka ×${f.vigruzkas.length}`].filter(Boolean).join(" · ")}</div></div>
+                  {isOpen ? <ChevronLeft size={16} color={COLORS.muted} /> : <ChevronRight size={16} color={COLORS.muted} />}
+                </button>
+                {isOpen && <div style={{ padding: "0 16px 16px", borderTop: `1px solid ${COLORS.border}`, paddingTop: 14, display: "flex", flexDirection: "column", gap: 14 }}>{renderFileEvents(f, true)}</div>}
+              </Panel>
+            );
+          })}
+          {pendingChanges.length > 0 && (<><div style={{ fontFamily: "Oswald", fontSize: 15, fontWeight: 600, marginTop: 6 }}>Transport almashinuvlari</div>{pendingChanges.map((ev) => <EventDetail key={ev.id} label={CHANGE_LABELS[ev.type]} ev={ev} fields={["address", "km", "newKm", "motoChas", "loadStatus", "newTractorNumber", "newTrailerNumber"]} standalonePanel />)}</>)}
+          <Btn full variant="danger" disabled={!hasPending} onClick={() => setSendStep("confirm")} icon={Check}>BARCHA FAYLLARNI JO'NATISH</Btn>
+        </>
+      )}
+
+      {subTab === "archive" && (
+        <>
+          {trip.sends.length === 0 && <Panel style={{ textAlign: "center", padding: "30px 20px", color: COLORS.muted, fontSize: 13 }}>Hali jo'natilgan fayl yo'q</Panel>}
+          {[...trip.sends].reverse().map((batch) => {
+            const events = batchEventsFor(trip.history, batch.id);
+            if (events.length === 0) return null;
+            const fromAt = events[0].at, toAt = events[events.length - 1].at;
+            const key = `b-${batch.id}`; const isOpen = openId === key;
+            return (
+              <Panel key={key} style={{ padding: 0, overflow: "hidden" }}>
+                <button onClick={() => setOpenId(isOpen ? null : key)} style={{ width: "100%", background: "transparent", border: "none", padding: 16, display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", color: COLORS.text }}>
+                  <div style={{ textAlign: "left" }}>
+                    <div style={{ fontFamily: "Oswald", fontSize: 14.5, fontWeight: 600 }}>🔒 {batch.batchNumber}-jo'natish</div>
+                    <div style={{ fontSize: 11, color: COLORS.muted, marginTop: 2 }}>Boshlang'ich: {fmtDate(fromAt)}</div>
+                    <div style={{ fontSize: 11, color: COLORS.muted }}>Tugash: {fmtDate(toAt)}</div>
+                  </div>
+                  {isOpen ? <ChevronLeft size={16} color={COLORS.muted} /> : <ChevronRight size={16} color={COLORS.muted} />}
+                </button>
+                {isOpen && (
+                  <div style={{ padding: "0 16px 16px", borderTop: `1px solid ${COLORS.border}`, paddingTop: 14, display: "flex", flexDirection: "column", gap: 14 }}>
+                    <Btn variant="ghost" onClick={() => copyBatch(batch, events)}>{copiedId === batch.id ? "Nusxalandi ✓" : "Nusxalash"}</Btn>
+                    {events.map((ev) => <EventDetail key={ev.id} label={ev.type === "zagruzka" ? "ZAGRUZKA" : ev.type === "zapravka" ? "ZAPRAVKA" : ev.type === "vigruzka" ? "VIGRUZKA" : (CHANGE_LABELS[ev.type] || ev.type)} ev={ev} fields={ev.type === "zagruzka" ? ["address", "km", "distance"] : ev.type === "zapravka" ? ["km", "distance", "tractorLiters", "trailerLiters", "adBlue"] : ev.type === "vigruzka" ? ["address", "km", "distance", "motoChas", "motoChasWorked"] : ["address", "km", "newKm", "motoChas", "loadStatus", "newTractorNumber", "newTrailerNumber"]} />)}
+                  </div>
+                )}
+              </Panel>
+            );
+          })}
+        </>
+      )}
+
+      {editingEvent && <EditEventModal ev={editingEvent} onClose={() => setEditingEvent(null)} onSave={(patch) => { onUpdateEvent(editingEvent.id, patch); setEditingEvent(null); }} />}
+      {sendStep === "confirm" && <SendConfirmModal onCancel={() => setSendStep(null)} onConfirm={() => setSendStep("countdown")} />}
+      {sendStep === "countdown" && <SendCountdownModal onCancel={() => setSendStep(null)} onDone={() => { onSendAll(); setSendStep(null); setSubTab("archive"); }} />}
+    </div>
+  );
+}
+function SendConfirmModal({ onCancel, onConfirm }) {
+  return (
+    <ModalShell title="Diqqat!" onClose={onCancel}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        <div style={{ display: "flex", gap: 10, alignItems: "flex-start", background: COLORS.red + "18", borderRadius: 8, padding: 12 }}><AlertTriangle size={18} color={COLORS.red} style={{ flexShrink: 0, marginTop: 1 }} /><div style={{ fontSize: 12.5, color: COLORS.text, lineHeight: 1.6 }}>Barcha fayllarni jo'natganingizdan keyin ular tahrirlash uchun yopiladi.<br />10 soniyadan keyin fayllar avtomatik qulflanadi.<br />Qulflangandan keyin ma'lumotlarni o'zgartirib bo'lmaydi.</div></div>
+        <div style={{ display: "flex", gap: 10 }}><Btn variant="ghost" full onClick={onCancel}>Bekor qilish</Btn><Btn variant="danger" full onClick={onConfirm}>Jo'natishni tasdiqlash</Btn></div>
+      </div>
+    </ModalShell>
+  );
+}
+function SendCountdownModal({ onCancel, onDone }) {
+  const [count, setCount] = useState(10);
+  useEffect(() => { if (count <= 0) { onDone(); return; } const t = setTimeout(() => setCount((c) => c - 1), 1000); return () => clearTimeout(t); }, [count]);
+  return (
+    <ModalShell title="Fayllar yuborilmoqda" onClose={onCancel}>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 18, padding: "10px 0 4px" }}>
+        <div style={{ fontFamily: "'Roboto Mono', monospace", fontWeight: 700, fontSize: 52, color: COLORS.amber, textShadow: `0 0 20px ${COLORS.amber}55` }}>{count}</div>
+        <div style={{ fontSize: 12.5, color: COLORS.muted, textAlign: "center" }}>Shu vaqt ichida bekor qilishingiz mumkin</div>
+        <Btn variant="ghost" full onClick={onCancel}>Bekor qilish</Btn>
+      </div>
+    </ModalShell>
+  );
+}
+function EditEventModal({ ev, onClose, onSave }) {
+  if (ev.type === "zagruzka") return <EditZagruzka ev={ev} onClose={onClose} onSave={onSave} />;
+  if (ev.type === "zapravka") return <EditZapravka ev={ev} onClose={onClose} onSave={onSave} />;
+  if (ev.type === "vigruzka") return <EditVigruzka ev={ev} onClose={onClose} onSave={onSave} />;
+  return null;
+}
+function EditZagruzka({ ev, onClose, onSave }) {
+  const [km, setKm] = useState(String(ev.km ?? "")); const [address, setAddress] = useState(ev.address || ""); const [photos, setPhotos] = useState(ev.photos || []);
+  const valid = km !== "" && address && photos.length > 0;
+  return (<ModalShell title="Zagruzkani tahrirlash" onClose={onClose}><div style={{ display: "flex", flexDirection: "column", gap: 14 }}><Field label="Km" value={km} onChange={setKm} suffix="km" /><AddressPicker value={address} onChange={setAddress} /><MultiPhotoPicker label="Yuk hujjatlari fotosi" photos={photos} onChange={setPhotos} required allowComment /><Btn full disabled={!valid} onClick={() => onSave({ km: num(km), address, photos })} icon={Check}>Saqlash</Btn></div></ModalShell>);
+}
+function EditZapravka({ ev, onClose, onSave }) {
+  const [km, setKm] = useState(String(ev.km ?? "")); const [tractorLiters, setTractorLiters] = useState(ev.tractorLiters ? String(ev.tractorLiters) : ""); const [tractorDieselPhotos, setTractorDieselPhotos] = useState(ev.tractorDieselPhotos || []);
+  const [trailerLiters, setTrailerLiters] = useState(ev.trailerLiters ? String(ev.trailerLiters) : ""); const [trailerDieselPhotos, setTrailerDieselPhotos] = useState(ev.trailerDieselPhotos || []);
+  const [adBlue, setAdBlue] = useState(ev.adBlue ? String(ev.adBlue) : ""); const [adBluePhotos, setAdBluePhotos] = useState(ev.adBluePhotos || []);
+  const hasTractorDiesel = tractorLiters !== ""; const hasTrailerDiesel = trailerLiters !== ""; const hasAdBlue = adBlue !== "";
+  const valid = km !== "" && (hasTractorDiesel || hasTrailerDiesel || hasAdBlue) && (!hasTractorDiesel || tractorDieselPhotos.length > 0) && (!hasTrailerDiesel || trailerDieselPhotos.length > 0) && (!hasAdBlue || adBluePhotos.length > 0);
+  return (
+    <ModalShell title="Zapravkani tahrirlash" onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <Field label="Km" value={km} onChange={setKm} suffix="km" />
+        <SectionLabel>TYAGACH SALYARKASI</SectionLabel><Field label="Tyagachga quyilgan diesel" value={tractorLiters} onChange={setTractorLiters} suffix="litr" /><MultiPhotoPicker label="Tyagach cheki" photos={tractorDieselPhotos} onChange={setTractorDieselPhotos} required={hasTractorDiesel} allowComment />
+        <SectionLabel>PRISEP SALYARKASI</SectionLabel><Field label="Prisepga (refga) quyilgan diesel" value={trailerLiters} onChange={setTrailerLiters} suffix="litr" /><MultiPhotoPicker label="Prisep cheki" photos={trailerDieselPhotos} onChange={setTrailerDieselPhotos} required={hasTrailerDiesel} allowComment />
+        <SectionLabel>ADBLUE</SectionLabel><Field label="AdBlue" value={adBlue} onChange={setAdBlue} suffix="litr" /><MultiPhotoPicker label="AdBlue cheki" photos={adBluePhotos} onChange={setAdBluePhotos} required={hasAdBlue} allowComment />
+        <Btn full disabled={!valid} onClick={() => onSave({ km: num(km), tractorLiters, tractorDieselPhotos, trailerLiters, trailerDieselPhotos, adBlue, adBluePhotos })} icon={Check}>Saqlash</Btn>
+      </div>
+    </ModalShell>
+  );
+}
+function EditVigruzka({ ev, onClose, onSave }) {
+  const [km, setKm] = useState(String(ev.km ?? "")); const [address, setAddress] = useState(ev.address || ""); const [motoChas, setMotoChas] = useState(String(ev.motoChas ?? "")); const [motoChasPhoto, setMotoChasPhoto] = useState(ev.motoChasPhoto || null); const [photos, setPhotos] = useState(ev.photos || []);
+  const valid = km !== "" && address && motoChas !== "" && motoChasPhoto && photos.length > 0;
+  return (
+    <ModalShell title="Vigruzkani tahrirlash" onClose={onClose}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <Field label="Km" value={km} onChange={setKm} suffix="km" /><AddressPicker value={address} onChange={setAddress} /><Field label="Prisep motochasi" value={motoChas} onChange={setMotoChas} suffix="soat" />
+        {motoChas !== "" && <PhotoPicker label="Motochas ko'rsatkichi rasmi" photo={motoChasPhoto} onPick={setMotoChasPhoto} onClear={() => setMotoChasPhoto(null)} required allowComment />}
+        <MultiPhotoPicker label="Tushirish hujjati fotosi" photos={photos} onChange={setPhotos} required allowComment />
+        <div style={{ fontSize: 11, color: COLORS.green }}>Saqlagach, bosib o'tilgan masofa va ishlagan soat shu yangi qiymat asosida avtomatik qayta hisoblanadi.</div>
+        <Btn full disabled={!valid} onClick={() => onSave({ km: num(km), address, motoChas: num(motoChas), motoChasPhoto, photos })} icon={Check}>Saqlash</Btn>
+      </div>
+    </ModalShell>
+  );
+}
+function PhotoGroupRow({ ev }) {
+  return (<>
+    {ev.photos && ev.photos.length > 0 && <div style={{ marginTop: 8 }}><PhotoGroup photos={ev.photos} /></div>}
+    {(ev.tractorDieselPhotos?.length > 0 || ev.trailerDieselPhotos?.length > 0 || ev.adBluePhotos?.length > 0 || ev.motoChasPhoto) && (
+      <div style={{ display: "flex", gap: 16, marginTop: 8, flexWrap: "wrap" }}>
+        <PhotoGroup label="Tyagach cheki" photos={ev.tractorDieselPhotos} />
+        <PhotoGroup label="Prisep cheki" photos={ev.trailerDieselPhotos} />
+        <PhotoGroup label="AdBlue cheki" photos={ev.adBluePhotos} />
+        <PhotoGroup label="Motochas rasmi" photos={ev.motoChasPhoto ? [ev.motoChasPhoto] : []} />
+      </div>
+    )}
+  </>);
+}
+const FIELD_LABELS = { address: "Manzil", km: "Km", newKm: "Km", distance: "Masofa", tractorLiters: "Tyagach diesel", trailerLiters: "Prisep diesel", adBlue: "AdBlue", motoChas: "Motochas", motoChasWorked: "Ishlagan soat", loadStatus: "Yuk holati", newTractorNumber: "Yangi tyagach", newTrailerNumber: "Yangi prisep" };
+const LOAD_LABELS = { S_GRUZ: "S GRUZ", BEZ_GRUZ: "BEZ GRUZ" };
+function EventDetail({ label, ev, fields, standalonePanel, editable, onEdit }) {
+  const rows = fields.filter((f) => ev[f] !== undefined && ev[f] !== null && ev[f] !== "");
+  const showEdit = editable && onEdit && EDITABLE_TYPES.includes(ev.type);
+  const content = (
+    <>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <span style={{ fontFamily: "Oswald", fontSize: 13, fontWeight: 600, color: COLORS.amber }}>{label}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}><span style={{ fontSize: 10.5, color: COLORS.muted }}>{fmtDate(ev.at)}</span>{showEdit && <button onClick={onEdit} style={{ background: "transparent", border: `1px solid ${COLORS.border}`, borderRadius: 6, padding: "3px 8px", color: COLORS.amber, fontSize: 10.5, fontFamily: "Inter", fontWeight: 600, cursor: "pointer" }}>Tahrirlash</button>}</div>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+        {rows.map((f) => <div key={f} style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}><span style={{ color: COLORS.muted }}>{FIELD_LABELS[f]}</span><span style={{ fontFamily: "'Roboto Mono', monospace", fontWeight: 600 }}>{f === "loadStatus" ? LOAD_LABELS[ev[f]] : f === "km" || f === "distance" || f === "newKm" ? `${fmt(ev[f])} km` : f === "motoChas" || f === "motoChasWorked" ? `${fmt(ev[f])} soat` : f.toLowerCase().includes("liters") || f === "adBlue" ? `${fmt(ev[f])} l` : ev[f]}</span></div>)}
+      </div>
+      <PhotoGroupRow ev={ev} />
+    </>
+  );
+  return standalonePanel ? <Panel>{content}</Panel> : <div style={{ background: COLORS.panel2, borderRadius: 8, padding: 12 }}>{content}</div>;
+}
+
+// ---------------- Profil ----------------
+function ProfilTab({ driver, trip, onReset }) {
+  const [confirmingReset, setConfirmingReset] = useState(false);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <Panel><div style={{ fontFamily: "Oswald", fontSize: 15, fontWeight: 600, marginBottom: 12 }}>Haydovchi</div><div style={{ fontSize: 14 }}>{driver.firstName} {driver.lastName}</div></Panel>
+      <Panel>
+        <div style={{ fontFamily: "Oswald", fontSize: 15, fontWeight: 600, marginBottom: 12 }}>Joriy transport</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+          <Readout label="Tyagach" value={trip.tractorNumber} /><Readout label="Prisep" value={trip.trailerNumber || "PRISEPSIZ"} tone={trip.trailerNumber ? "amber" : "red"} />
+          <Readout label="Joriy tyagachda bosilgan" value={fmt(trip.lastKm - trip.currentTractorStartKm)} unit="km" /><Readout label="Joriy prisepda ishlagan" value={fmt(trip.lastMotoChas - trip.currentTrailerStartMotoChas)} unit="soat" tone="amber" />
+        </div>
+        {trip.motoChasPhoto && <div style={{ marginTop: 14 }}><PhotoGroup label="Boshlang'ich motochas rasmi" photos={[trip.motoChasPhoto]} /></div>}
+      </Panel>
+      <Panel>
+        <div style={{ fontFamily: "Oswald", fontSize: 13.5, fontWeight: 600, marginBottom: 8 }}>Reysni yakunlash</div>
+        <div style={{ fontSize: 11.5, color: COLORS.muted, marginBottom: 10 }}>Bu amal tyagach va prisepni bazada "bo'sh" holatiga o'tkazadi va reysni yopadi.</div>
+        {!confirmingReset ? <Btn variant="danger" full onClick={() => setConfirmingReset(true)}>Reysni yakunlash</Btn> : (
+          <div style={{ display: "flex", gap: 10 }}><Btn variant="ghost" onClick={() => setConfirmingReset(false)}>Bekor qilish</Btn><Btn variant="danger" full onClick={onReset}>Tasdiqlayman</Btn></div>
+        )}
+      </Panel>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
