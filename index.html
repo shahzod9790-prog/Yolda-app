@@ -452,6 +452,7 @@ function App() {
   const [modal, setModal] = useState(null);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState(null);
+  const busyRef = useRef(false); // guards against double-submit (double-tap) writing the same event twice
 
   useEffect(() => {
     (async () => {
@@ -481,6 +482,8 @@ function App() {
   }
 
   async function startTrip(data) {
+    if (busyRef.current) return;
+    busyRef.current = true;
     setErrorMsg(null);
     try {
       const { data: tripId, error } = await sb.rpc("start_trip", {
@@ -494,71 +497,121 @@ function App() {
       setTrip(t); setModal(null); setTab("main");
     } catch (err) {
       setErrorMsg(err.message?.includes("TRACTOR_BUSY") ? "Bu tyagach hozir boshqa reysda band." : err.message?.includes("TRAILER_BUSY") ? "Bu prisep hozir boshqa reysda band." : "Xatolik: " + err.message);
+    } finally {
+      busyRef.current = false;
     }
   }
 
   async function addEvent(type, data) {
-    const { error } = await sb.from("trip_events").insert({ trip_id: trip.id, type, data });
-    if (error) { setErrorMsg("Saqlashda xatolik: " + error.message); return; }
-    setModal(null); await refreshTrip();
+    if (busyRef.current) return;
+    busyRef.current = true;
+    try {
+      const { error } = await sb.from("trip_events").insert({ trip_id: trip.id, type, data });
+      if (error) { setErrorMsg("Saqlashda xatolik: " + error.message); return; }
+      setModal(null); await refreshTrip();
+    } finally {
+      busyRef.current = false;
+    }
   }
 
   async function tractorFinish(data) {
-    const { error } = await sb.rpc("finish_tractor", { p_trip_id: trip.id, p_km: num(data.km), p_address: data.address });
-    if (error) { setErrorMsg(error.message); return; }
-    setModal(null); await refreshTrip();
+    if (busyRef.current) return;
+    busyRef.current = true;
+    try {
+      const { error } = await sb.rpc("finish_tractor", { p_trip_id: trip.id, p_km: num(data.km), p_address: data.address });
+      if (error) { setErrorMsg(error.message); return; }
+      setModal(null); await refreshTrip();
+    } finally {
+      busyRef.current = false;
+    }
   }
   async function tractorAccept(data) {
+    if (busyRef.current) return;
+    busyRef.current = true;
     try {
       const { error } = await sb.rpc("accept_tractor", { p_trip_id: trip.id, p_new_tractor_number: data.newTractorNumber, p_new_km: num(data.newKm), p_address: data.address });
       if (error) throw error;
       await refreshTrip();
     } catch (err) { setErrorMsg(err.message?.includes("TRACTOR_BUSY") ? "Bu tyagach hozir band." : err.message); }
+    finally { busyRef.current = false; }
   }
   async function tractorConfirm() {
+    if (busyRef.current) return;
     const pend = derivePending(trip.history).pendingTractor;
     if (!pend.accept) return;
-    const { error } = await sb.rpc("confirm_tractor", { p_trip_id: trip.id, p_new_tractor_number: pend.accept.newTractorNumber, p_new_km: pend.accept.newKm });
-    if (error) { setErrorMsg(error.message); return; }
-    setModal(null); await refreshTrip();
+    busyRef.current = true;
+    try {
+      const { error } = await sb.rpc("confirm_tractor", { p_trip_id: trip.id, p_new_tractor_number: pend.accept.newTractorNumber, p_new_km: pend.accept.newKm });
+      if (error) { setErrorMsg(error.message); return; }
+      setModal(null); await refreshTrip();
+    } finally {
+      busyRef.current = false;
+    }
   }
   async function trailerFinish(data) {
-    const { error } = await sb.rpc("finish_trailer", { p_trip_id: trip.id, p_km: num(data.km), p_address: data.address, p_moto_chas: num(data.motoChas), p_moto_chas_photo: data.motoChasPhoto, p_load_status: data.loadStatus, p_photos: data.photos });
-    if (error) { setErrorMsg(error.message); return; }
-    setModal(null); await refreshTrip();
+    if (busyRef.current) return;
+    busyRef.current = true;
+    try {
+      const { error } = await sb.rpc("finish_trailer", { p_trip_id: trip.id, p_km: num(data.km), p_address: data.address, p_moto_chas: num(data.motoChas), p_moto_chas_photo: data.motoChasPhoto, p_load_status: data.loadStatus, p_photos: data.photos });
+      if (error) { setErrorMsg(error.message); return; }
+      setModal(null); await refreshTrip();
+    } finally {
+      busyRef.current = false;
+    }
   }
   async function trailerAccept(data) {
+    if (busyRef.current) return;
+    busyRef.current = true;
     try {
       const { error } = await sb.rpc("accept_trailer", { p_trip_id: trip.id, p_new_trailer_number: data.newTrailerNumber, p_new_km: num(data.newKm), p_address: data.address, p_moto_chas: num(data.motoChas), p_moto_chas_photo: data.motoChasPhoto, p_load_status: data.loadStatus, p_photos: data.photos });
       if (error) throw error;
       await refreshTrip();
     } catch (err) { setErrorMsg(err.message?.includes("TRAILER_BUSY") ? "Bu prisep hozir band." : err.message); }
+    finally { busyRef.current = false; }
   }
   async function trailerConfirm() {
+    if (busyRef.current) return;
     const pend = derivePending(trip.history).pendingTrailer;
     if (!pend.accept) return;
-    const { error } = await sb.rpc("confirm_trailer", { p_trip_id: trip.id, p_new_trailer_number: pend.accept.newTrailerNumber, p_moto_chas: pend.accept.motoChas });
-    if (error) { setErrorMsg(error.message); return; }
-    setModal(null); await refreshTrip();
+    busyRef.current = true;
+    try {
+      const { error } = await sb.rpc("confirm_trailer", { p_trip_id: trip.id, p_new_trailer_number: pend.accept.newTrailerNumber, p_moto_chas: pend.accept.motoChas });
+      if (error) { setErrorMsg(error.message); return; }
+      setModal(null); await refreshTrip();
+    } finally {
+      busyRef.current = false;
+    }
   }
 
   async function updateEvent(id, patch) {
-    const ev = trip.history.find((e) => e.id === id);
-    const { error } = await sb.from("trip_events").update({ data: { ...eventRawData(ev), ...patch } }).eq("id", id);
-    if (error) { setErrorMsg(error.message); return; }
-    await refreshTrip();
+    if (busyRef.current) return;
+    busyRef.current = true;
+    try {
+      const ev = trip.history.find((e) => e.id === id);
+      const { error } = await sb.from("trip_events").update({ data: { ...eventRawData(ev), ...patch } }).eq("id", id);
+      if (error) { setErrorMsg(error.message); return; }
+      await refreshTrip();
+    } finally {
+      busyRef.current = false;
+    }
   }
   async function sendAllFiles() {
-    const { data: pendingRows, error: e0 } = await sb.from("trip_events").select("id").eq("trip_id", trip.id).is("batch_id", null);
-    if (e0) { setErrorMsg(e0.message); return; }
-    if (!pendingRows || pendingRows.length === 0) return;
-    const { data: lastBatch } = await sb.from("trip_sends").select("batch_number").eq("trip_id", trip.id).order("batch_number", { ascending: false }).limit(1);
-    const nextNumber = (lastBatch && lastBatch[0] ? lastBatch[0].batch_number : 0) + 1;
-    const { data: newBatch, error: e1 } = await sb.from("trip_sends").insert({ trip_id: trip.id, batch_number: nextNumber }).select().single();
-    if (e1) { setErrorMsg(e1.message); return; }
-    const { error: e2 } = await sb.from("trip_events").update({ batch_id: newBatch.id }).in("id", pendingRows.map((r) => r.id));
-    if (e2) { setErrorMsg(e2.message); return; }
-    await refreshTrip();
+    if (busyRef.current) return;
+    busyRef.current = true;
+    try {
+      const { data: pendingRows, error: e0 } = await sb.from("trip_events").select("id").eq("trip_id", trip.id).is("batch_id", null);
+      if (e0) { setErrorMsg(e0.message); return; }
+      if (!pendingRows || pendingRows.length === 0) return;
+      const { data: lastBatch } = await sb.from("trip_sends").select("batch_number").eq("trip_id", trip.id).order("batch_number", { ascending: false }).limit(1);
+      const nextNumber = (lastBatch && lastBatch[0] ? lastBatch[0].batch_number : 0) + 1;
+      const { data: newBatch, error: e1 } = await sb.from("trip_sends").insert({ trip_id: trip.id, batch_number: nextNumber }).select().single();
+      if (e1) { setErrorMsg(e1.message); return; }
+      const { error: e2 } = await sb.from("trip_events").update({ batch_id: newBatch.id }).in("id", pendingRows.map((r) => r.id));
+      if (e2) { setErrorMsg(e2.message); return; }
+      await refreshTrip();
+    } finally {
+      busyRef.current = false;
+    }
   }
   async function resetTrip() {
     await sb.rpc("end_trip", { p_trip_id: trip.id });
