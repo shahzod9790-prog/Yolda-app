@@ -78,6 +78,39 @@ function resizeImage(file, maxW = 480) {
     reader.readAsDataURL(file);
   });
 }
+// ---------------- Rasm sifatini tekshirish ----------------
+// Qora / oppoq / bo'sh rasm — "hard": saqlashga ruxsat berilmaydi, qayta olish majburiy.
+// Xira rasm — "soft": ogohlantiriladi, qayta olish tavsiya etiladi (haydovchi zarurat bo'lsa baribir saqlashi mumkin).
+const BLUR_MIN_SHARPNESS = 150; // Laplacian dispersiyasi shundan past bo'lsa — xira deb hisoblanadi (sinov: o'tkir hujjat ≈ 4500, biroz xira ≈ 500, yaroqsiz xira < 120)
+function analyzePhotoQuality(source) {
+  try {
+    const sw = source.naturalWidth || source.width, sh = source.naturalHeight || source.height;
+    if (!sw || !sh) return { hard: true, text: "Rasm olinmadi. Qayta urinib ko'ring." };
+    const w = 160, h = Math.max(3, Math.round((w * sh) / sw));
+    const c = document.createElement("canvas"); c.width = w; c.height = h;
+    const ctx = c.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(source, 0, 0, w, h);
+    const px = ctx.getImageData(0, 0, w, h).data;
+    const g = new Float32Array(w * h); let sum = 0;
+    for (let i = 0, p = 0; i < px.length; i += 4, p++) { const y = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2]; g[p] = y; sum += y; }
+    const mean = sum / g.length; let sq = 0;
+    for (let p = 0; p < g.length; p++) sq += (g[p] - mean) * (g[p] - mean);
+    const std = Math.sqrt(sq / g.length);
+    let ls = 0, lq = 0, n = 0;
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) { const i = y * w + x; const l = 4 * g[i] - g[i - 1] - g[i + 1] - g[i - w] - g[i + w]; ls += l; lq += l * l; n++; }
+    const sharp = lq / n - (ls / n) * (ls / n);
+    const m = { mean: Math.round(mean), std: Math.round(std * 10) / 10, sharp: Math.round(sharp * 10) / 10 };
+    // Qorong'i yoki oppoq bo'lsa ham, ichida kontrastli tafsilot bo'lsa (masalan, tunda qorong'i panelda yorqin raqamlar) rasm yaroqli hisoblanadi
+    if (mean < 14 && std < 12) return { ...m, hard: true, text: "Rasm qora chiqdi. Kamera yopilmaganini va yorug'lik yetarli ekanini tekshirib, qayta oling." };
+    if (mean > 242 && std < 12) return { ...m, hard: true, text: "Rasm juda yorug' (oppoq) chiqdi. Qayta oling." };
+    if (std < 2.5) return { ...m, hard: true, text: "Rasm bo'sh ko'rinyapti — hech narsa ko'rinmayapti. Qayta oling." };
+    if (sharp < BLUR_MIN_SHARPNESS) return { ...m, hard: false, text: "Rasm xira bo'lishi mumkin. Yozuvlar aniq o'qilishi uchun qayta olishni tavsiya qilamiz." };
+    return { ...m, hard: false, text: null };
+  } catch (e) { return { hard: false, text: null }; }
+}
+function analyzePhotoDataUrl(url) {
+  return new Promise((resolve) => { const img = new Image(); img.onload = () => resolve(analyzePhotoQuality(img)); img.onerror = () => resolve({ hard: false, text: null }); img.src = url; });
+}
 // DB ustunlariga mos kelmaydigan, faqat ko'rsatish uchun hisoblanadigan maydonlarni olib tashlaydi
 function eventRawData(ev) {
   const { id, type, at, distance, motoChasWorked, ...rest } = ev;
@@ -150,32 +183,53 @@ const COMMENT_MAX = 120;
 
 function CameraCaptureModal({ onCapture, onClose }) {
   const videoRef = useRef(null); const canvasRef = useRef(null); const fileInputRef = useRef(null); const streamRef = useRef(null);
+  const aliveRef = useRef(true);
   const [stage, setStage] = useState("loading");
+  const [ready, setReady] = useState(false); // video haqiqatan kadr bera boshlaganda true bo'ladi
+  const [problem, setProblem] = useState(null); // { text, soft } — rasm sifati haqida xabar
   const [capturedUrl, setCapturedUrl] = useState(null);
   const [comment, setComment] = useState("");
 
   async function startStream() {
-    setStage("loading");
+    setStage("loading"); setReady(false); setProblem(null);
     try {
       if (!navigator.mediaDevices?.getUserMedia) throw new Error("unsupported");
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      if (!aliveRef.current) { stream.getTracks().forEach((t) => t.stop()); return; } // oyna yopilib bo'lgan — kamerani o'chiramiz
       streamRef.current = stream;
-      if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play(); }
-      setStage("live");
-    } catch { setStage("unsupported"); }
+      setStage("live"); // <video> shu paytda chiziladi; oqim pastdagi effektda unga ulanadi
+    } catch { if (aliveRef.current) setStage("unsupported"); }
   }
-  useEffect(() => { startStream(); return () => { streamRef.current?.getTracks().forEach((t) => t.stop()); }; }, []);
+  // <video> faqat "live" bosqichda mavjud bo'ladi, shuning uchun oqimni aynan shu yerda — video paydo bo'lgandan keyin — ulaymiz
+  useEffect(() => {
+    if (stage !== "live") return;
+    const video = videoRef.current, stream = streamRef.current;
+    if (!video || !stream) return;
+    video.srcObject = stream;
+    video.play().catch(() => { if (aliveRef.current) setStage("unsupported"); });
+  }, [stage]);
+  useEffect(() => { startStream(); return () => { aliveRef.current = false; streamRef.current?.getTracks().forEach((t) => t.stop()); }; }, []);
   function stopStream() { streamRef.current?.getTracks().forEach((t) => t.stop()); streamRef.current = null; }
   function capture() {
     const video = videoRef.current, canvas = canvasRef.current;
     if (!video || !canvas) return;
-    const maxW = 480, scale = Math.min(1, maxW / (video.videoWidth || maxW));
-    canvas.width = (video.videoWidth || maxW) * scale; canvas.height = (video.videoHeight || maxW) * scale;
+    if (!video.videoWidth || video.readyState < 2) { setProblem({ text: "Kamera hali tayyor emas. Bir soniya kutib, qayta bosing.", soft: false }); return; }
+    const scale = Math.min(1, 480 / video.videoWidth);
+    canvas.width = Math.round(video.videoWidth * scale); canvas.height = Math.round(video.videoHeight * scale);
     canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
-    setCapturedUrl(canvas.toDataURL("image/jpeg", 0.6)); stopStream(); setStage("preview");
+    const q = analyzePhotoQuality(canvas);
+    if (q.hard) { setProblem({ text: q.text, soft: false }); return; } // kamera ochiq qoladi — darhol qayta olish mumkin
+    setCapturedUrl(canvas.toDataURL("image/jpeg", 0.6)); setProblem(q.text ? { text: q.text, soft: true } : null);
+    stopStream(); setStage("preview");
   }
-  function retake() { setCapturedUrl(null); setComment(""); startStream(); }
-  async function handleFallbackFile(e) { const file = e.target.files?.[0]; if (file) { setCapturedUrl(await resizeImage(file)); setStage("preview"); } e.target.value = ""; }
+  function retake() { setCapturedUrl(null); setComment(""); setProblem(null); startStream(); }
+  async function handleFallbackFile(e) {
+    const file = e.target.files?.[0]; e.target.value = "";
+    if (!file) return;
+    const url = await resizeImage(file); const q = await analyzePhotoDataUrl(url);
+    if (q.hard) { setProblem({ text: q.text, soft: false }); return; }
+    setCapturedUrl(url); setProblem(q.text ? { text: q.text, soft: true } : null); setStage("preview");
+  }
   function closeAll() { stopStream(); onClose(); }
 
   return (
@@ -189,13 +243,16 @@ function CameraCaptureModal({ onCapture, onClose }) {
           <div style={{ color: "#9AA0A6", fontFamily: "Inter", fontSize: 13 }}>Ilova ichidagi kameraga ruxsat berilmadi yoki qo'llab-quvvatlanmaydi. Odatdagi kamera orqali davom eting.</div>
           <Btn onClick={() => fileInputRef.current?.click()} icon={Camera}>Rasmga olish</Btn>
           <input ref={fileInputRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={handleFallbackFile} />
+          {problem && <div style={{ width: "100%", maxWidth: 360 }}><PhotoProblem problem={problem} /></div>}
         </div>
       )}
       {stage === "live" && (
         <>
-          <video ref={videoRef} playsInline muted style={{ flex: 1, width: "100%", objectFit: "cover", background: "#000" }} />
-          <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, display: "flex", justifyContent: "center", padding: "0 0 calc(28px + env(safe-area-inset-bottom))" }}>
-            <button onClick={capture} aria-label="Rasmga olish" style={{ width: 68, height: 68, borderRadius: "50%", background: "#fff", border: "4px solid #ffffff55", cursor: "pointer" }} />
+          <video ref={videoRef} playsInline muted onPlaying={() => setReady(true)} style={{ flex: 1, width: "100%", objectFit: "cover", background: "#000" }} />
+          {!ready && <div style={{ position: "absolute", top: "45%", left: 0, right: 0, textAlign: "center", color: "#9AA0A6", fontFamily: "Inter", fontSize: 13, pointerEvents: "none" }}>Kamera ochilmoqda...</div>}
+          <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 14, padding: "0 16px calc(28px + env(safe-area-inset-bottom))" }}>
+            {problem && <div style={{ width: "100%", maxWidth: 360 }}><PhotoProblem problem={problem} /></div>}
+            <button onClick={capture} disabled={!ready} aria-label="Rasmga olish" style={{ width: 68, height: 68, borderRadius: "50%", background: "#fff", border: "4px solid #ffffff55", cursor: ready ? "pointer" : "not-allowed", opacity: ready ? 1 : 0.35 }} />
           </div>
         </>
       )}
@@ -207,9 +264,10 @@ function CameraCaptureModal({ onCapture, onClose }) {
               <input autoFocus value={comment} onChange={(e) => setComment(e.target.value.slice(0, COMMENT_MAX))} placeholder="Izoh yozish... (ixtiyoriy)" style={{ flex: 1, minWidth: 0, background: "transparent", border: "none", outline: "none", color: COLORS.text, fontFamily: "Inter", fontSize: 13 }} />
               <span style={{ fontSize: 9, color: COLORS.muted, flexShrink: 0 }}>{comment.length}/{COMMENT_MAX}</span>
             </div>
+            <PhotoProblem problem={problem} />
             <div style={{ display: "flex", gap: 8 }}>
-              <Btn variant="ghost" full onClick={retake}>Qayta olish</Btn>
-              <Btn full onClick={() => onCapture({ url: capturedUrl, comment: comment.trim() })} icon={Check}>Saqlash</Btn>
+              <Btn variant={problem?.soft ? "primary" : "ghost"} full onClick={retake}>Qayta olish</Btn>
+              <Btn variant={problem?.soft ? "ghost" : "primary"} full onClick={() => onCapture({ url: capturedUrl, comment: comment.trim() })} icon={Check}>{problem?.soft ? "Baribir saqlash" : "Saqlash"}</Btn>
             </div>
           </div>
         </div>
@@ -218,11 +276,22 @@ function CameraCaptureModal({ onCapture, onClose }) {
     </div>
   );
 }
+function PhotoProblem({ problem }) {
+  if (!problem) return null;
+  const c = problem.soft ? COLORS.amber : COLORS.red;
+  return <div style={{ display: "flex", gap: 8, alignItems: "flex-start", background: problem.soft ? c + "22" : "#1D2126", border: `1px solid ${c}88`, borderRadius: 8, padding: "9px 11px" }}><AlertTriangle size={15} color={c} style={{ flexShrink: 0, marginTop: 1 }} /><span style={{ fontSize: 12, color: COLORS.text, lineHeight: 1.45 }}>{problem.text}</span></div>;
+}
 
 function PhotoPicker({ label, photo, onPick, onClear, required, allowComment }) {
-  const inputRef = useRef(null); const [cameraOpen, setCameraOpen] = useState(false);
+  const inputRef = useRef(null); const [cameraOpen, setCameraOpen] = useState(false); const [problem, setProblem] = useState(null);
   const url = photo ? photoUrl(photo) : null; const comment = photo ? photoComment(photo) : "";
   function openCapture() { if (allowComment) setCameraOpen(true); else inputRef.current?.click(); }
+  // Oddiy fayl orqali olingan rasm (reys boshidagi motochas rasmi): qora/bo'sh bo'lsa qabul qilinmaydi, xira bo'lsa ogohlantiriladi
+  async function pickFromFile(file) {
+    const dataUrl = await resizeImage(file); const q = await analyzePhotoDataUrl(dataUrl);
+    if (q.hard) { setProblem({ text: q.text, soft: false }); return; }
+    setProblem(q.text ? { text: q.text, soft: true } : null); onPick(dataUrl);
+  }
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       <span style={{ fontFamily: "Inter", fontSize: 12.5, color: COLORS.muted, fontWeight: 500 }}>{label}{required && <span style={{ color: COLORS.red }}> *</span>}</span>
@@ -230,7 +299,7 @@ function PhotoPicker({ label, photo, onPick, onClear, required, allowComment }) 
         <div style={{ display: "flex", flexDirection: "column", gap: 4, width: 88 }}>
           <div style={{ position: "relative", width: 88, height: 88 }}>
             <img src={url} alt="" style={{ width: 88, height: 88, objectFit: "cover", borderRadius: 8, border: `1px solid ${COLORS.border}` }} />
-            <button onClick={onClear} style={{ position: "absolute", top: -6, right: -6, background: COLORS.red, border: "none", borderRadius: "50%", width: 20, height: 20, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}><X size={12} /></button>
+            <button onClick={() => { setProblem(null); onClear(); }} style={{ position: "absolute", top: -6, right: -6, background: COLORS.red, border: "none", borderRadius: "50%", width: 20, height: 20, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}><X size={12} /></button>
           </div>
           {comment && <span style={{ fontSize: 9.5, color: COLORS.muted, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={comment}>{comment}</span>}
         </div>
@@ -239,7 +308,8 @@ function PhotoPicker({ label, photo, onPick, onClear, required, allowComment }) 
           <Camera size={19} /><span style={{ fontSize: 9.5, fontFamily: "Inter" }}>rasmga olish</span>
         </button>
       )}
-      {!allowComment && <input ref={inputRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={async (e) => { const file = e.target.files?.[0]; if (file) onPick(await resizeImage(file)); e.target.value = ""; }} />}
+      {!allowComment && <input ref={inputRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={async (e) => { const file = e.target.files?.[0]; e.target.value = ""; if (file) await pickFromFile(file); }} />}
+      {problem && <PhotoProblem problem={problem} />}
       {cameraOpen && <CameraCaptureModal onClose={() => setCameraOpen(false)} onCapture={(result) => { onPick(result); setCameraOpen(false); }} />}
     </div>
   );
@@ -464,7 +534,11 @@ function App() {
   }, []);
 
   function persistLocal(next) { setLocal(next); saveLocal(next); }
-  async function refreshTrip() { if (!local?.activeTripId) return; setTrip(await fetchTripFull(local.activeTripId)); }
+  async function refreshTrip() {
+    if (!local?.activeTripId) return;
+    const t = await fetchTripFull(local.activeTripId);
+    if (t) setTrip(t); else setErrorMsg("Ma'lumotni yangilab bo'lmadi. Internet aloqasini tekshirib, sahifani yangilang."); // xatoda mavjud reys ekrandan yo'qolmasin
+  }
 
   async function saveDriver(driver) {
     setErrorMsg(null);
@@ -523,7 +597,7 @@ function App() {
     try {
       const { error } = await sb.rpc("finish_tractor", { p_trip_id: trip.id, p_km: num(data.km), p_address: data.address });
       if (error) { setErrorMsg(error.message); return; }
-      setModal(null); await refreshTrip();
+      await refreshTrip(); setModal(null); // avval yangi holat yuklanadi, keyin oyna yopiladi (eski holat ko'rinib qolmasligi uchun)
     } finally {
       busyRef.current = false;
     }
@@ -546,7 +620,7 @@ function App() {
     try {
       const { error } = await sb.rpc("confirm_tractor", { p_trip_id: trip.id, p_new_tractor_number: pend.accept.newTractorNumber, p_new_km: pend.accept.newKm });
       if (error) { setErrorMsg(error.message); return; }
-      setModal(null); await refreshTrip();
+      await refreshTrip(); setModal(null); // avval yangi holat yuklanadi, keyin oyna yopiladi (eski holat ko'rinib qolmasligi uchun)
     } finally {
       busyRef.current = false;
     }
@@ -557,7 +631,7 @@ function App() {
     try {
       const { error } = await sb.rpc("finish_trailer", { p_trip_id: trip.id, p_km: num(data.km), p_address: data.address, p_moto_chas: num(data.motoChas), p_moto_chas_photo: data.motoChasPhoto, p_load_status: data.loadStatus, p_photos: data.photos });
       if (error) { setErrorMsg(error.message); return; }
-      setModal(null); await refreshTrip();
+      await refreshTrip(); setModal(null); // avval yangi holat yuklanadi, keyin oyna yopiladi (eski holat ko'rinib qolmasligi uchun)
     } finally {
       busyRef.current = false;
     }
@@ -580,7 +654,7 @@ function App() {
     try {
       const { error } = await sb.rpc("confirm_trailer", { p_trip_id: trip.id, p_new_trailer_number: pend.accept.newTrailerNumber, p_moto_chas: pend.accept.motoChas });
       if (error) { setErrorMsg(error.message); return; }
-      setModal(null); await refreshTrip();
+      await refreshTrip(); setModal(null); // avval yangi holat yuklanadi, keyin oyna yopiladi (eski holat ko'rinib qolmasligi uchun)
     } finally {
       busyRef.current = false;
     }
@@ -1016,7 +1090,7 @@ function FilesTab({ trip, driverLabel, onUpdateEvent, onSendAll }) {
         </>
       )}
 
-      {editingEvent && <EditEventModal ev={editingEvent} onClose={() => setEditingEvent(null)} onSave={(patch) => { onUpdateEvent(editingEvent.id, patch); setEditingEvent(null); }} />}
+      {editingEvent && <EditEventModal ev={editingEvent} hasTrailer={!!trip.trailerNumber} onClose={() => setEditingEvent(null)} onSave={(patch) => { onUpdateEvent(editingEvent.id, patch); setEditingEvent(null); }} />}
       {sendStep === "confirm" && <SendConfirmModal onCancel={() => setSendStep(null)} onConfirm={() => setSendStep("countdown")} />}
       {sendStep === "countdown" && <SendCountdownModal onCancel={() => setSendStep(null)} onDone={() => { onSendAll(); setSendStep(null); setSubTab("archive"); }} />}
     </div>
@@ -1045,9 +1119,9 @@ function SendCountdownModal({ onCancel, onDone }) {
     </ModalShell>
   );
 }
-function EditEventModal({ ev, onClose, onSave }) {
+function EditEventModal({ ev, hasTrailer, onClose, onSave }) {
   if (ev.type === "zagruzka") return <EditZagruzka ev={ev} onClose={onClose} onSave={onSave} />;
-  if (ev.type === "zapravka") return <EditZapravka ev={ev} onClose={onClose} onSave={onSave} />;
+  if (ev.type === "zapravka") return <EditZapravka ev={ev} hasTrailer={hasTrailer} onClose={onClose} onSave={onSave} />;
   if (ev.type === "vigruzka") return <EditVigruzka ev={ev} onClose={onClose} onSave={onSave} />;
   return null;
 }
@@ -1056,20 +1130,22 @@ function EditZagruzka({ ev, onClose, onSave }) {
   const valid = km !== "" && address && photos.length > 0;
   return (<ModalShell title="Zagruzkani tahrirlash" onClose={onClose}><div style={{ display: "flex", flexDirection: "column", gap: 14 }}><Field label="Km" value={km} onChange={setKm} suffix="km" /><AddressPicker value={address} onChange={setAddress} /><MultiPhotoPicker label="Yuk hujjatlari fotosi" photos={photos} onChange={setPhotos} required allowComment /><Btn full disabled={!valid} onClick={() => onSave({ km: num(km), address, photos })} icon={Check}>Saqlash</Btn></div></ModalShell>);
 }
-function EditZapravka({ ev, onClose, onSave }) {
+function EditZapravka({ ev, hasTrailer, onClose, onSave }) {
+  // Prisepsiz holatda prisep salyarkasi/cheki maydonlari ko'rsatilmaydi (agar yozuvda avvaldan prisep ma'lumoti bo'lmasa)
+  const showTrailer = hasTrailer || !!ev.trailerLiters || (ev.trailerDieselPhotos || []).length > 0;
   const [km, setKm] = useState(String(ev.km ?? "")); const [tractorLiters, setTractorLiters] = useState(ev.tractorLiters ? String(ev.tractorLiters) : ""); const [tractorDieselPhotos, setTractorDieselPhotos] = useState(ev.tractorDieselPhotos || []);
   const [trailerLiters, setTrailerLiters] = useState(ev.trailerLiters ? String(ev.trailerLiters) : ""); const [trailerDieselPhotos, setTrailerDieselPhotos] = useState(ev.trailerDieselPhotos || []);
   const [adBlue, setAdBlue] = useState(ev.adBlue ? String(ev.adBlue) : ""); const [adBluePhotos, setAdBluePhotos] = useState(ev.adBluePhotos || []);
-  const hasTractorDiesel = tractorLiters !== ""; const hasTrailerDiesel = trailerLiters !== ""; const hasAdBlue = adBlue !== "";
+  const hasTractorDiesel = tractorLiters !== ""; const hasTrailerDiesel = showTrailer && trailerLiters !== ""; const hasAdBlue = adBlue !== "";
   const valid = km !== "" && (hasTractorDiesel || hasTrailerDiesel || hasAdBlue) && (!hasTractorDiesel || tractorDieselPhotos.length > 0) && (!hasTrailerDiesel || trailerDieselPhotos.length > 0) && (!hasAdBlue || adBluePhotos.length > 0);
   return (
     <ModalShell title="Zapravkani tahrirlash" onClose={onClose}>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <Field label="Km" value={km} onChange={setKm} suffix="km" />
         <SectionLabel>TYAGACH SALYARKASI</SectionLabel><Field label="Tyagachga quyilgan diesel" value={tractorLiters} onChange={setTractorLiters} suffix="litr" /><MultiPhotoPicker label="Tyagach cheki" photos={tractorDieselPhotos} onChange={setTractorDieselPhotos} required={hasTractorDiesel} allowComment />
-        <SectionLabel>PRISEP SALYARKASI</SectionLabel><Field label="Prisepga (refga) quyilgan diesel" value={trailerLiters} onChange={setTrailerLiters} suffix="litr" /><MultiPhotoPicker label="Prisep cheki" photos={trailerDieselPhotos} onChange={setTrailerDieselPhotos} required={hasTrailerDiesel} allowComment />
+        {showTrailer && (<><SectionLabel>PRISEP SALYARKASI</SectionLabel><Field label="Prisepga (refga) quyilgan diesel" value={trailerLiters} onChange={setTrailerLiters} suffix="litr" /><MultiPhotoPicker label="Prisep cheki" photos={trailerDieselPhotos} onChange={setTrailerDieselPhotos} required={hasTrailerDiesel} allowComment /></>)}
         <SectionLabel>ADBLUE</SectionLabel><Field label="AdBlue" value={adBlue} onChange={setAdBlue} suffix="litr" /><MultiPhotoPicker label="AdBlue cheki" photos={adBluePhotos} onChange={setAdBluePhotos} required={hasAdBlue} allowComment />
-        <Btn full disabled={!valid} onClick={() => onSave({ km: num(km), tractorLiters, tractorDieselPhotos, trailerLiters, trailerDieselPhotos, adBlue, adBluePhotos })} icon={Check}>Saqlash</Btn>
+        <Btn full disabled={!valid} onClick={() => onSave({ km: num(km), tractorLiters, tractorDieselPhotos, trailerLiters: showTrailer ? trailerLiters : (ev.trailerLiters ?? ""), trailerDieselPhotos: showTrailer ? trailerDieselPhotos : (ev.trailerDieselPhotos || []), adBlue, adBluePhotos })} icon={Check}>Saqlash</Btn>
       </div>
     </ModalShell>
   );
