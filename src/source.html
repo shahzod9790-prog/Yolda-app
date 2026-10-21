@@ -68,23 +68,76 @@ function num(v) { const n = parseFloat(v); return isNaN(n) ? 0 : n; }
 function fmt(n, d = 0) { return (Math.round(n * 10 ** d) / 10 ** d).toLocaleString("ru-RU"); }
 function fmtDate(ts) { return new Date(ts).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }); }
 function photoUrl(p) { return typeof p === "string" ? p : p?.url; }
+function photoThumb(p) { return typeof p === "string" ? p : (p?.thumb || p?.url); }
 function photoComment(p) { return typeof p === "string" ? "" : (p?.comment || ""); }
-function resizeImage(file, maxW = 480) {
-  return new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const img = new Image();
-      img.onload = () => {
-        const scale = Math.min(1, maxW / img.width);
-        const canvas = document.createElement("canvas");
-        canvas.width = img.width * scale; canvas.height = img.height * scale;
-        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-        resolve(canvas.toDataURL("image/jpeg", 0.55));
-      };
-      img.src = e.target.result;
-    };
-    reader.readAsDataURL(file);
+// Serverdagi rasm uchun brauzer "saqlash" oynasini ochadigan havola (Supabase ?download= qo'llab-quvvatlaydi); eski (base64) rasm o'z holicha
+function downloadHref(url, name) { return typeof url === "string" && url.startsWith("http") ? url + (url.includes("?") ? "&" : "?") + "download=" + encodeURIComponent(name) : url; }
+
+// ---------------- Rasm tayyorlash va saqlash ----------------
+// Rasm to'liq sifatda Supabase Storage'ga yuklanadi; bazada faqat havola + kichik ko'rinish (thumb) saqlanadi.
+// Eski yozuvlardagi (base64) rasmlar o'zgarishsiz ishlayveradi. Yuklash bo'lmasa — kichik sifatli zaxira (lowres).
+const PHOTO_MAX_SIDE = 1600, PHOTO_QUALITY = 0.75, THUMB_SIDE = 200, THUMB_QUALITY = 0.6, LOWRES_SIDE = 640, LOWRES_QUALITY = 0.6;
+const PHOTO_BUCKET = "trip-photos";
+function pauseMs(ms) { return new Promise((r) => setTimeout(r, ms)); }
+function withTimeout(p, ms) { return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]); }
+function loadImage(src) { return new Promise((resolve, reject) => { const img = new Image(); img.onload = () => resolve(img); img.onerror = () => reject(new Error("image")); img.src = src; }); }
+// Eng uzun tomonini maxSide ga tushiradi (kattalashtirmaydi)
+function drawScaled(source, maxSide) {
+  const sw = source.naturalWidth || source.videoWidth || source.width, sh = source.naturalHeight || source.videoHeight || source.height;
+  const scale = Math.min(1, maxSide / Math.max(sw, sh));
+  const canvas = document.createElement("canvas"); canvas.width = Math.max(1, Math.round(sw * scale)); canvas.height = Math.max(1, Math.round(sh * scale));
+  canvas.getContext("2d").drawImage(source, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+function resizeImage(file) {
+  return new Promise((resolve, reject) => {
+    const objUrl = URL.createObjectURL(file); const img = new Image();
+    img.onload = () => { try { resolve(drawScaled(img, PHOTO_MAX_SIDE).toDataURL("image/jpeg", PHOTO_QUALITY)); } catch (e) { reject(e); } finally { URL.revokeObjectURL(objUrl); } };
+    img.onerror = () => { URL.revokeObjectURL(objUrl); reject(new Error("Rasmni o'qib bo'lmadi")); };
+    img.src = objUrl;
   });
+}
+function dataUrlToBlob(u) {
+  const comma = u.indexOf(","), mime = /data:([^;,]+)/.exec(u.slice(0, comma))?.[1] || "image/jpeg";
+  const bin = atob(u.slice(comma + 1)), arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return new Blob([arr], { type: mime });
+}
+function uuid4() {
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  const b = new Uint8Array(16);
+  if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(b); else for (let i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256);
+  b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+// Nom shakli bazadagi siyosatga mos: YYYY/MM/<uuid>.jpg
+function newPhotoPath() { const d = new Date(); return `${d.getUTCFullYear()}/${String(d.getUTCMonth() + 1).padStart(2, "0")}/${uuid4()}.jpg`; }
+async function uploadToStorage(dataUrl) {
+  const blob = dataUrlToBlob(dataUrl), path = newPhotoPath(); let lastErr = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { error } = await withTimeout(sb.storage.from(PHOTO_BUCKET).upload(path, blob, { contentType: "image/jpeg", cacheControl: "31536000", upsert: false }), 20000);
+      const exists = error && (String(error.statusCode) === "409" || /already exists|duplicate/i.test(error.message || "")); // oldingi urinish aslida yetib borgan bo'lsa
+      if (!error || exists) return sb.storage.from(PHOTO_BUCKET).getPublicUrl(path).data.publicUrl;
+      lastErr = error;
+    } catch (e) { lastErr = e; }
+    if (attempt === 0) await pauseMs(800);
+  }
+  throw lastErr || new Error("upload");
+}
+async function makeThumb(dataUrl) { const img = await loadImage(dataUrl); return drawScaled(img, THUMB_SIDE).toDataURL("image/jpeg", THUMB_QUALITY); }
+// dataUrl → { url, thumb, comment }. Yuklash bo'lmasa: allowLowRes bo'lsa kichik sifatli zaxira, aks holda xatolik.
+async function savePhoto(dataUrl, comment, { allowLowRes = false } = {}) {
+  const thumb = await makeThumb(dataUrl).catch(() => null);
+  try {
+    const url = await uploadToStorage(dataUrl);
+    return thumb ? { url, thumb, comment } : { url, comment };
+  } catch (e) {
+    if (!allowLowRes) throw e;
+    const img = await loadImage(dataUrl);
+    return { url: drawScaled(img, LOWRES_SIDE).toDataURL("image/jpeg", LOWRES_QUALITY), comment, lowres: true };
+  }
 }
 // ---------------- Rasm sifatini tekshirish ----------------
 // Qora / oppoq / bo'sh rasm — "hard": saqlashga ruxsat berilmaydi, qayta olish majburiy.
@@ -92,8 +145,10 @@ function resizeImage(file, maxW = 480) {
 const BLUR_MIN_SHARPNESS = 150; // Laplacian dispersiyasi shundan past bo'lsa — xira deb hisoblanadi (sinov: o'tkir hujjat ≈ 4500, biroz xira ≈ 500, yaroqsiz xira < 120)
 function analyzePhotoQuality(source) {
   try {
-    const sw = source.naturalWidth || source.width, sh = source.naturalHeight || source.height;
+    let sw = source.naturalWidth || source.videoWidth || source.width, sh = source.naturalHeight || source.videoHeight || source.height;
     if (!sw || !sh) return { hard: true, text: "Rasm olinmadi. Qayta urinib ko'ring." };
+    // Eski sinov (threshold) 480 px kenglikdagi rasmga moslab o'lchangan: katta rasmni avval shu o'lchamga tushiramiz, natija o'zgarmasin
+    if (sw > 480) { const k = 480 / sw, mid = document.createElement("canvas"); mid.width = 480; mid.height = Math.max(3, Math.round(sh * k)); mid.getContext("2d").drawImage(source, 0, 0, mid.width, mid.height); source = mid; sw = mid.width; sh = mid.height; }
     const w = 160, h = Math.max(3, Math.round((w * sh) / sw));
     const c = document.createElement("canvas"); c.width = w; c.height = h;
     const ctx = c.getContext("2d", { willReadFrequently: true });
@@ -121,7 +176,7 @@ function analyzePhotoDataUrl(url) {
 }
 // DB ustunlariga mos kelmaydigan, faqat ko'rsatish uchun hisoblanadigan maydonlarni olib tashlaydi
 function eventRawData(ev) {
-  const { id, type, at, distance, motoChasWorked, ...rest } = ev;
+  const { id, type, at, distance, motoChasWorked, batchId, ...rest } = ev; // batchId — alohida ustunda; JSON ichiga yozilmaydi
   return rest;
 }
 
@@ -197,12 +252,13 @@ function CameraCaptureModal({ onCapture, onClose }) {
   const [problem, setProblem] = useState(null); // { text, soft } — rasm sifati haqida xabar
   const [capturedUrl, setCapturedUrl] = useState(null);
   const [comment, setComment] = useState("");
+  const [saving, setSaving] = useState(false); const [uploadFailed, setUploadFailed] = useState(false); // rasm serverga yuklanmoqda / yuklanmadi
 
   async function startStream() {
     setStage("loading"); setReady(false); setProblem(null);
     try {
       if (!navigator.mediaDevices?.getUserMedia) throw new Error("unsupported");
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } } });
       if (!aliveRef.current) { stream.getTracks().forEach((t) => t.stop()); return; } // oyna yopilib bo'lgan — kamerani o'chiramiz
       streamRef.current = stream;
       setStage("live"); // <video> shu paytda chiziladi; oqim pastdagi effektda unga ulanadi
@@ -222,21 +278,32 @@ function CameraCaptureModal({ onCapture, onClose }) {
     const video = videoRef.current, canvas = canvasRef.current;
     if (!video || !canvas) return;
     if (!video.videoWidth || video.readyState < 2) { setProblem({ text: "Kamera hali tayyor emas. Bir soniya kutib, qayta bosing.", soft: false }); return; }
-    const scale = Math.min(1, 480 / video.videoWidth);
+    const scale = Math.min(1, PHOTO_MAX_SIDE / Math.max(video.videoWidth, video.videoHeight));
     canvas.width = Math.round(video.videoWidth * scale); canvas.height = Math.round(video.videoHeight * scale);
     canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
     const q = analyzePhotoQuality(canvas);
     if (q.hard) { setProblem({ text: q.text, soft: false }); return; } // kamera ochiq qoladi — darhol qayta olish mumkin
-    setCapturedUrl(canvas.toDataURL("image/jpeg", 0.6)); setProblem(q.text ? { text: q.text, soft: true } : null);
+    setCapturedUrl(canvas.toDataURL("image/jpeg", PHOTO_QUALITY)); setProblem(q.text ? { text: q.text, soft: true } : null);
     stopStream(); setStage("preview");
   }
-  function retake() { setCapturedUrl(null); setComment(""); setProblem(null); startStream(); }
+  function retake() { setCapturedUrl(null); setComment(""); setProblem(null); setSaving(false); setUploadFailed(false); startStream(); }
   async function handleFallbackFile(e) {
     const file = e.target.files?.[0]; e.target.value = "";
     if (!file) return;
-    const url = await resizeImage(file); const q = await analyzePhotoDataUrl(url);
+    let url, q;
+    try { url = await resizeImage(file); q = await analyzePhotoDataUrl(url); } catch { setProblem({ text: "Rasmni o'qib bo'lmadi. Qayta urinib ko'ring.", soft: false }); return; }
     if (q.hard) { setProblem({ text: q.text, soft: false }); return; }
     setCapturedUrl(url); setProblem(q.text ? { text: q.text, soft: true } : null); setStage("preview");
+  }
+  // Rasmni serverga yuklab, so'ng formaga uzatadi. Yuklanmasa — oyna ochiq qoladi: qayta urinish yoki kichik sifatda saqlash
+  async function save(allowLowRes) {
+    if (saving || !capturedUrl) return;
+    setSaving(true); setUploadFailed(false);
+    try {
+      const photo = await savePhoto(capturedUrl, comment.trim(), { allowLowRes });
+      if (!aliveRef.current) return;
+      onCapture(photo);
+    } catch { if (aliveRef.current) { setSaving(false); setUploadFailed(true); } }
   }
   function closeAll() { stopStream(); onClose(); }
 
@@ -273,10 +340,18 @@ function CameraCaptureModal({ onCapture, onClose }) {
               <span style={{ fontSize: 9, color: COLORS.muted, flexShrink: 0 }}>{comment.length}/{COMMENT_MAX}</span>
             </div>
             <PhotoProblem problem={problem} />
-            <div style={{ display: "flex", gap: 8 }}>
-              <Btn variant={problem?.soft ? "primary" : "ghost"} full onClick={retake}>Qayta olish</Btn>
-              <Btn variant={problem?.soft ? "ghost" : "primary"} full onClick={() => onCapture({ url: capturedUrl, comment: comment.trim() })} icon={Check}>{problem?.soft ? "Baribir saqlash" : "Saqlash"}</Btn>
-            </div>
+            {uploadFailed && <PhotoProblem problem={{ text: "Rasm serverga yuklanmadi. Internet aloqasini tekshirib, qayta urinib ko'ring.", soft: false }} />}
+            {uploadFailed ? (
+              <>
+                <Btn full onClick={() => save(false)}>Qayta urinish</Btn>
+                <div style={{ display: "flex", gap: 8 }}><Btn variant="ghost" full onClick={retake}>Qayta olish</Btn><Btn variant="ghost" full onClick={() => save(true)}>Kichik sifatda saqlash</Btn></div>
+              </>
+            ) : (
+              <div style={{ display: "flex", gap: 8 }}>
+                <Btn variant={problem?.soft ? "primary" : "ghost"} full disabled={saving} onClick={retake}>Qayta olish</Btn>
+                <Btn variant={problem?.soft ? "ghost" : "primary"} full disabled={saving} onClick={() => save(false)} icon={saving ? undefined : Check}>{saving ? "Yuklanmoqda..." : problem?.soft ? "Baribir saqlash" : "Saqlash"}</Btn>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -291,14 +366,22 @@ function PhotoProblem({ problem }) {
 }
 
 function PhotoPicker({ label, photo, onPick, onClear, required, allowComment }) {
-  const inputRef = useRef(null); const [cameraOpen, setCameraOpen] = useState(false); const [problem, setProblem] = useState(null); const [viewing, setViewing] = useState(false);
-  const url = photo ? photoUrl(photo) : null; const comment = photo ? photoComment(photo) : "";
+  const inputRef = useRef(null); const [cameraOpen, setCameraOpen] = useState(false); const [problem, setProblem] = useState(null); const [viewing, setViewing] = useState(false); const [uploading, setUploading] = useState(false);
+  const url = photo ? photoUrl(photo) : null; const thumb = photo ? photoThumb(photo) : null; const comment = photo ? photoComment(photo) : "";
   function openCapture() { if (allowComment) setCameraOpen(true); else inputRef.current?.click(); }
-  // Oddiy fayl orqali olingan rasm (reys boshidagi motochas rasmi): qora/bo'sh bo'lsa qabul qilinmaydi, xira bo'lsa ogohlantiriladi
+  // Oddiy fayl orqali olingan rasm (reys boshidagi motochas rasmi): qora/bo'sh bo'lsa qabul qilinmaydi, xira bo'lsa ogohlantiriladi.
+  // Rasm darhol serverga yuklanadi; yuklanmasa — xabar chiqadi va rasm qabul qilinmaydi (qayta olish kerak).
   async function pickFromFile(file) {
-    const dataUrl = await resizeImage(file); const q = await analyzePhotoDataUrl(dataUrl);
-    if (q.hard) { setProblem({ text: q.text, soft: false }); return; }
-    setProblem(q.text ? { text: q.text, soft: true } : null); onPick(dataUrl);
+    if (uploading) return;
+    setUploading(true);
+    try {
+      let dataUrl, q;
+      try { dataUrl = await resizeImage(file); q = await analyzePhotoDataUrl(dataUrl); } catch { setProblem({ text: "Rasmni o'qib bo'lmadi. Qayta urinib ko'ring.", soft: false }); return; }
+      if (q.hard) { setProblem({ text: q.text, soft: false }); return; }
+      let saved;
+      try { saved = await savePhoto(dataUrl, ""); } catch { setProblem({ text: "Rasm serverga yuklanmadi. Internet aloqasini tekshirib, qayta oling.", soft: false }); return; }
+      setProblem(q.text ? { text: q.text, soft: true } : null); onPick(saved);
+    } finally { setUploading(false); }
   }
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -306,14 +389,14 @@ function PhotoPicker({ label, photo, onPick, onClear, required, allowComment }) 
       {url ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 4, width: 88 }}>
           <div style={{ position: "relative", width: 88, height: 88 }}>
-            <img src={url} alt="" onClick={() => setViewing(true)} style={{ width: 88, height: 88, objectFit: "cover", borderRadius: 8, border: `1px solid ${COLORS.border}`, cursor: "pointer" }} />
+            <img src={thumb} alt="" onClick={() => setViewing(true)} style={{ width: 88, height: 88, objectFit: "cover", borderRadius: 8, border: `1px solid ${COLORS.border}`, cursor: "pointer" }} />
             <button onClick={() => { setProblem(null); onClear(); }} style={{ position: "absolute", top: -6, right: -6, background: COLORS.red, border: "none", borderRadius: "50%", width: 20, height: 20, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}><X size={12} /></button>
           </div>
           {comment && <span style={{ fontSize: 9.5, color: COLORS.muted, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={comment}>{comment}</span>}
         </div>
       ) : (
-        <button onClick={openCapture} style={{ width: 88, height: 88, borderRadius: 8, border: `1px dashed ${COLORS.border}`, background: COLORS.panel2, color: COLORS.muted, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, cursor: "pointer" }}>
-          <Camera size={19} /><span style={{ fontSize: 9.5, fontFamily: "Inter" }}>rasmga olish</span>
+        <button onClick={openCapture} disabled={uploading} style={{ width: 88, height: 88, borderRadius: 8, border: `1px dashed ${COLORS.border}`, background: COLORS.panel2, color: COLORS.muted, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, cursor: uploading ? "wait" : "pointer" }}>
+          <Camera size={19} /><span style={{ fontSize: 9.5, fontFamily: "Inter" }}>{uploading ? "yuklanmoqda…" : "rasmga olish"}</span>
         </button>
       )}
       {!allowComment && <input ref={inputRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={async (e) => { const file = e.target.files?.[0]; e.target.value = ""; if (file) await pickFromFile(file); }} />}
@@ -324,14 +407,22 @@ function PhotoPicker({ label, photo, onPick, onClear, required, allowComment }) 
   );
 }
 function MultiPhotoPicker({ label, photos, onChange, required, allowComment }) {
-  const inputRef = useRef(null); const [cameraOpen, setCameraOpen] = useState(false); const [viewIdx, setViewIdx] = useState(null);
+  const inputRef = useRef(null); const [cameraOpen, setCameraOpen] = useState(false); const [viewIdx, setViewIdx] = useState(null); const [uploading, setUploading] = useState(false); const [problem, setProblem] = useState(null);
   function openCapture() { if (allowComment) setCameraOpen(true); else inputRef.current?.click(); }
+  async function addFromFile(file) {
+    if (uploading) return;
+    setUploading(true); setProblem(null);
+    try {
+      let dataUrl; try { dataUrl = await resizeImage(file); } catch { setProblem({ text: "Rasmni o'qib bo'lmadi. Qayta urinib ko'ring.", soft: false }); return; }
+      try { const saved = await savePhoto(dataUrl, ""); onChange([...photos, saved]); } catch { setProblem({ text: "Rasm serverga yuklanmadi. Internet aloqasini tekshirib, qayta oling.", soft: false }); }
+    } finally { setUploading(false); }
+  }
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       <span style={{ fontFamily: "Inter", fontSize: 12.5, color: COLORS.muted, fontWeight: 500 }}>{label}{required && <span style={{ color: COLORS.red }}> *</span>}</span>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
         {photos.map((p, i) => {
-          const url = photoUrl(p), comment = photoComment(p);
+          const url = photoThumb(p), comment = photoComment(p);
           return (
             <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4, width: 72 }}>
               <div style={{ position: "relative", width: 72, height: 72 }}>
@@ -342,11 +433,12 @@ function MultiPhotoPicker({ label, photos, onChange, required, allowComment }) {
             </div>
           );
         })}
-        <button onClick={openCapture} style={{ width: 72, height: 72, borderRadius: 8, border: `1px dashed ${COLORS.border}`, background: COLORS.panel2, color: COLORS.muted, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3, cursor: "pointer" }}>
-          <Plus size={16} /><span style={{ fontSize: 9, fontFamily: "Inter" }}>qo'shish</span>
+        <button onClick={openCapture} disabled={uploading} style={{ width: 72, height: 72, borderRadius: 8, border: `1px dashed ${COLORS.border}`, background: COLORS.panel2, color: COLORS.muted, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3, cursor: uploading ? "wait" : "pointer" }}>
+          <Plus size={16} /><span style={{ fontSize: 9, fontFamily: "Inter" }}>{uploading ? "yuklanmoqda…" : "qo'shish"}</span>
         </button>
       </div>
-      {!allowComment && <input ref={inputRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={async (e) => { const file = e.target.files?.[0]; if (file) onChange([...photos, await resizeImage(file)]); e.target.value = ""; }} />}
+      {problem && <PhotoProblem problem={problem} />}
+      {!allowComment && <input ref={inputRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={async (e) => { const file = e.target.files?.[0]; e.target.value = ""; if (file) await addFromFile(file); }} />}
       {viewIdx !== null && photos[viewIdx] && <PhotoViewer photos={photos} startIndex={viewIdx} label={label} onClose={() => setViewIdx(null)} />}
       {cameraOpen && <CameraCaptureModal onClose={() => setCameraOpen(false)} onCapture={(result) => { onChange([...photos, result]); setCameraOpen(false); }} />}
     </div>
@@ -425,14 +517,16 @@ function PhotoViewer({ photos, startIndex = 0, label, onClose, allowDownload }) 
   const [dragging, setDragging] = useState(false);
   const [dark, setDark] = useState(false);
   const [broken, setBroken] = useState(false);
-  const stageRef = useRef(null), imgRef = useRef(null), viewRef = useRef(view), api = useRef({});
+  const [loaded, setLoaded] = useState(false); // to'liq rasm yuklandimi (yuklanguncha kichik ko'rinish turadi)
+  const stageRef = useRef(null), imgRef = useRef(null), thumbRef = useRef(null), viewRef = useRef(view), api = useRef({});
   const ptrs = useRef(new Map());
   const g = useRef({ startDist: 0, startS: 1, startMidX: 0, startMidY: 0, baseX: 0, baseY: 0, downX: 0, downY: 0, moved: false, lastTap: 0, lastTapX: 0, lastTapY: 0, dx: 0 });
   viewRef.current = view;
-  const photo = photos[idx], url = photoUrl(photo), comment = photoComment(photo);
+  const photo = photos[idx], url = photoUrl(photo), thumb = photoThumb(photo), comment = photoComment(photo);
+  const hasThumb = !!thumb && thumb !== url;
 
   function clampView(s, x, y) {
-    const st = stageRef.current, im = imgRef.current;
+    const st = stageRef.current, im = (imgRef.current && imgRef.current.naturalWidth) ? imgRef.current : thumbRef.current;
     if (!st || !im || !im.naturalWidth) return { s, x, y };
     const fit = Math.min(st.clientWidth / im.naturalWidth, st.clientHeight / im.naturalHeight);
     const mx = Math.max(0, (im.naturalWidth * fit * s - st.clientWidth) / 2), my = Math.max(0, (im.naturalHeight * fit * s - st.clientHeight) / 2);
@@ -449,7 +543,7 @@ function PhotoViewer({ photos, startIndex = 0, label, onClose, allowDownload }) 
   function reset() { setView({ s: 1, x: 0, y: 0 }); }
   function go(d) {
     const n = idx + d; if (n < 0 || n >= photos.length) { reset(); return; }
-    setIdx(n); setView({ s: 1, x: 0, y: 0 }); setDark(false); setBroken(false);
+    setIdx(n); setView({ s: 1, x: 0, y: 0 }); setDark(false); setBroken(false); setLoaded(false);
   }
   api.current = { zoomTo, go, onClose, centerOf };
 
@@ -484,9 +578,11 @@ function PhotoViewer({ photos, startIndex = 0, label, onClose, allowDownload }) 
     };
   }, []);
 
-  function onImgLoad(e) {
-    setBroken(false);
-    try { // butunlay qora rasmni aniqlaymiz (eski kamera xatosi tufayli saqlangan)
+  // Butunlay qora rasmni aniqlaymiz (eski kamera xatosi tufayli saqlangan). Faqat data: rasmda (kichik ko'rinish yoki eski rasm) ishlaydi —
+  // serverdagi rasm boshqa domen, canvas uni o'qiy olmaydi; lekin uning kichik ko'rinishi har doim bazada bor.
+  function checkDark(e) {
+    if (!String(e.target.src).startsWith("data:")) return;
+    try {
       const c = document.createElement("canvas"); c.width = 24; c.height = 24;
       const cx = c.getContext("2d"); cx.drawImage(e.target, 0, 0, 24, 24);
       const d = cx.getImageData(0, 0, 24, 24).data; let sum = 0, mx = 0;
@@ -494,6 +590,7 @@ function PhotoViewer({ photos, startIndex = 0, label, onClose, allowDownload }) 
       setDark(sum / (d.length / 4) < 6 && mx < 30);
     } catch (err) { setDark(false); }
   }
+  function onFullLoad(e) { setLoaded(true); setBroken(false); checkDark(e); }
 
   function onPointerDown(e) {
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) {}
@@ -552,15 +649,19 @@ function PhotoViewer({ photos, startIndex = 0, label, onClose, allowDownload }) 
           {comment && <div style={{ fontSize: 12, opacity: 0.8, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{comment}</div>}
         </div>
         <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
-          {allowDownload && <a href={url} download={`yolda-rasm-${idx + 1}.jpg`} style={{ ...btn, fontSize: 13, textDecoration: "none", fontWeight: 600 }}>Yuklab olish</a>}
+          {allowDownload && <a href={downloadHref(url, `yolda-rasm-${idx + 1}.jpg`)} download={`yolda-rasm-${idx + 1}.jpg`} target="_blank" rel="noopener" style={{ ...btn, fontSize: 13, textDecoration: "none", fontWeight: 600 }}>Yuklab olish</a>}
           <button onClick={onClose} aria-label="Yopish" style={btn}>✕</button>
         </div>
       </div>
       <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
         <div ref={stageRef} data-photo-stage="" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp} style={{ position: "absolute", inset: 0, overflow: "hidden", touchAction: "none", cursor: view.s > 1 ? "grab" : "zoom-in" }}>
-          <img key={idx} ref={imgRef} src={url} alt="" draggable={false} onLoad={onImgLoad} onError={() => setBroken(true)} style={{ width: "100%", height: "100%", objectFit: "contain", pointerEvents: "none", transformOrigin: "center", transform: `translate(${view.x}px, ${view.y}px) scale(${view.s})`, transition: dragging ? "none" : "transform 0.18s ease-out", willChange: "transform" }} />
+          <div style={{ position: "absolute", inset: 0, pointerEvents: "none", transformOrigin: "center", transform: `translate(${view.x}px, ${view.y}px) scale(${view.s})`, transition: dragging ? "none" : "transform 0.18s ease-out", willChange: "transform" }}>
+            {hasThumb && !loaded && <img key={"t" + idx} ref={thumbRef} src={thumb} alt="" draggable={false} onLoad={checkDark} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain" }} />}
+            <img key={"f" + idx} ref={imgRef} src={url} alt="" draggable={false} onLoad={onFullLoad} onError={() => setBroken(true)} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", opacity: loaded || !hasThumb ? 1 : 0 }} />
+          </div>
         </div>
-        {(dark || broken) && <div data-photo-warning="" style={{ position: "absolute", left: 14, right: 14, bottom: 12, background: "#2A1A00F0", border: "1px solid #F5A623", borderRadius: 10, padding: "10px 12px", color: "#fff", fontSize: 12.5, lineHeight: 1.5, zIndex: 2, pointerEvents: "none" }}>{broken ? "Bu rasmni ochib bo'lmadi." : "Bu rasm qora bo'lib saqlangan (eski kamera xatosi). Uni tiklab bo'lmaydi — hujjat qayta suratga olinishi kerak."}</div>}
+        {hasThumb && !loaded && !broken && <div data-photo-loading="" style={{ position: "absolute", left: 0, right: 0, bottom: 12, textAlign: "center", color: "#fff", fontSize: 12, opacity: 0.85, pointerEvents: "none", zIndex: 2 }}>To'liq rasm yuklanmoqda…</div>}
+        {(dark || broken) && <div data-photo-warning="" style={{ position: "absolute", left: 14, right: 14, bottom: 12, background: "#2A1A00F0", border: "1px solid #F5A623", borderRadius: 10, padding: "10px 12px", color: "#fff", fontSize: 12.5, lineHeight: 1.5, zIndex: 2, pointerEvents: "none" }}>{broken ? (hasThumb ? "To'liq rasm ochilmadi (internet aloqasini tekshiring). Hozircha kichik ko'rinish turibdi." : "Bu rasmni ochib bo'lmadi.") : "Bu rasm qora bo'lib saqlangan (eski kamera xatosi). Uni tiklab bo'lmaydi — hujjat qayta suratga olinishi kerak."}</div>}
       </div>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "10px 14px calc(12px + env(safe-area-inset-bottom))", color: "#fff" }}>
         {photos.length > 1 && <button onClick={() => go(-1)} aria-label="Oldingi rasm" disabled={idx === 0} style={{ ...btn, opacity: idx === 0 ? 0.35 : 1 }}>‹</button>}
@@ -582,7 +683,7 @@ function PhotoGroup({ label, photos }) {
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         {photos.map((p, i) => { const url = photoUrl(p), comment = photoComment(p); return (
           <div key={i} style={{ display: "flex", flexDirection: "column", gap: 3, width: 44 }}>
-            <img src={url} alt="" onClick={() => setOpen(i)} style={{ width: 44, height: 44, objectFit: "cover", borderRadius: 6, cursor: "pointer" }} />
+            <img src={photoThumb(p)} alt="" loading="lazy" onClick={() => setOpen(i)} style={{ width: 44, height: 44, objectFit: "cover", borderRadius: 6, cursor: "pointer" }} />
             {comment && <span style={{ fontSize: 8.5, color: COLORS.muted, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={comment}>{comment}</span>}
           </div>
         ); })}
@@ -643,7 +744,7 @@ function derivePending(history) {
 }
 
 // ---------------- Supabase bilan ishlash ----------------
-function rowToEvent(row) { return { id: row.id, type: row.type, at: new Date(row.at).getTime(), batchId: row.batch_id || null, ...row.data }; }
+function rowToEvent(row) { return { ...row.data, id: row.id, type: row.type, at: new Date(row.at).getTime(), batchId: row.batch_id || null }; }
 async function fetchTripFull(tripId) {
   const { data: tripRow } = await sb.from("trips").select("*").eq("id", tripId).single();
   if (!tripRow) return null;
