@@ -336,6 +336,65 @@ function Field({ label, value, onChange, type = "number", placeholder, suffix, h
     </label>
   );
 }
+// ---------------- Raqam katagi: ofis bazasidan qidiradi ----------------
+// Haydovchi tyagach/prisep raqamini yozganda katak ofis qo'shgan ro'yxatdan ("Asosiy baza") qidiradi va
+// "bazada bor / band / yo'q" deb bildirib turadi. Internet bo'lmasa yoki baza javob bermasa — hech narsani to'smaydi.
+// REQUIRE_IN_BASE = true bo'lsa bazada yo'q raqam bilan davom etib bo'lmaydi; false bo'lsa faqat ogohlantiradi.
+const REQUIRE_IN_BASE = false;
+const normNum = (s) => String(s || "").trim().replace(/\s+/g, " ").toUpperCase();
+const numKey = (s) => String(s || "").toUpperCase().replace(/[^\p{L}\p{N}]/gu, ""); // bo'shliq, tire va harf kattaligi hisobga olinmaydi
+async function searchBase(table, key) {
+  // Bazada raqamlar bo'shliq bilan yozilgan bo'lishi mumkin ("MHE 704"), shuning uchun belgilar orasiga % qo'yiladi; so'ng aniq tekshiriladi
+  const { data, error } = await withTimeout(sb.from(table).select("number,status").ilike("number", key.split("").join("%") + "%").order("number").limit(40), 6000);
+  if (error) throw error;
+  const rows = (data || []).filter((r) => numKey(r.number).startsWith(key)).sort((a, b) => numKey(a.number).length - numKey(b.number).length || (a.number < b.number ? -1 : 1));
+  return { rows, exact: rows.find((r) => numKey(r.number) === key) || null };
+}
+function NumberField({ label, table, value, onChange, onStatus, placeholder }) {
+  const k = numKey(value);
+  const [res, setRes] = useState({ key: "", status: "idle", rows: [], exact: null });
+  const seq = useRef(0);
+  useEffect(() => {
+    if (!k) { seq.current++; setRes({ key: "", status: "idle", rows: [], exact: null }); return; }
+    const my = ++seq.current;
+    const t = setTimeout(async () => {
+      try {
+        const { rows, exact } = await searchBase(table, k);
+        if (my !== seq.current) return;
+        setRes({ key: k, status: exact ? (exact.status === "active" ? "busy" : "found") : rows.length ? "partial" : "missing", rows, exact });
+      } catch { if (my === seq.current) setRes({ key: k, status: "unknown", rows: [], exact: null }); }
+    }, 250);
+    return () => clearTimeout(t);
+  }, [k, table]);
+  const fresh = !!k && res.key === k;
+  const status = !k ? "idle" : fresh ? res.status : "checking"; // yuqoriga (forma tekshiruviga) faqat yangi natija chiqadi
+  const shown = !k ? "idle" : fresh || res.status !== "idle" ? res.status : "checking"; // ko'rsatishda eski natija miltillamasligi uchun qoladi
+  useEffect(() => { onStatus && onStatus(status); }, [status]);
+  // Bazada aniq shu raqam topilsa — bazadagi yozuvga tuzatiladi (masalan "mhe704" -> "MHE 704"), shunda takror yozuv paydo bo'lmaydi
+  useEffect(() => { if (fresh && res.exact && res.exact.number !== value) onChange(res.exact.number); }, [fresh, res.exact]);
+  const blur = () => { if (!value) return; const fixed = fresh && res.exact ? res.exact.number : normNum(value); if (fixed !== value) onChange(fixed); };
+  const tone = { found: COLORS.green, busy: COLORS.amber, partial: COLORS.amber, missing: COLORS.red }[shown];
+  const text = { checking: "Bazadan tekshirilmoqda…", found: "✓ Bazada bor", busy: "Bazada bor, lekin hozir band (boshqa reysda)", partial: "Bazada shunga o'xshash raqamlar bor — ro'yxatdan tanlang:", missing: REQUIRE_IN_BASE ? "Bazada yo'q — ofisga murojaat qiling" : "Bazada yo'q — raqamni tekshiring", unknown: "Bazani tekshirib bo'lmadi" }[shown];
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <span style={{ fontFamily: "Inter", fontSize: 12.5, color: COLORS.muted, fontWeight: 500 }}>{label}</span>
+        <input type="text" value={value} onChange={(e) => onChange(e.target.value)} onBlur={blur} placeholder={placeholder} autoCapitalize="characters" autoCorrect="off" autoComplete="off" spellCheck={false}
+          style={{ width: "100%", boxSizing: "border-box", background: COLORS.panel2, border: `1px solid ${tone || COLORS.border}`, borderRadius: 8, padding: "11px 12px", color: COLORS.text, fontFamily: "'Roboto Mono', monospace", fontSize: 15, fontWeight: 500, outline: "none", textTransform: "uppercase" }} />
+      </label>
+      {text && <div role="status" style={{ fontSize: 12, color: tone || COLORS.muted, opacity: fresh ? 1 : 0.6 }}>{text}</div>}
+      {shown === "partial" && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, opacity: fresh ? 1 : 0.6 }}>
+          {res.rows.slice(0, 6).map((r) => (
+            <button type="button" key={r.number} onClick={() => onChange(r.number)} style={{ background: COLORS.panel2, border: `1px solid ${COLORS.border}`, borderRadius: 8, padding: "7px 11px", color: COLORS.text, fontFamily: "'Roboto Mono', monospace", fontSize: 13.5, fontWeight: 600, cursor: "pointer" }}>
+              {r.number}{r.status === "active" && <span style={{ color: COLORS.amber, fontFamily: "Inter", fontWeight: 600, fontSize: 11 }}> · band</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 function Btn({ children, onClick, variant = "primary", full, disabled, icon: IconC }) {
   const styles = {
     primary: { background: COLORS.amber, color: "#1A1300", border: "none" },
@@ -1156,15 +1215,17 @@ function StartTripForm({ driver, onStart }) {
   const [tractorNumber, setTractorNumber] = useState(""); const [trailerNumber, setTrailerNumber] = useState("");
   const [motoChas, setMotoChas] = useState(""); const [motoChasPhoto, setMotoChasPhoto] = useState(null); const [startKm, setStartKm] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const valid = tractorNumber && trailerNumber && motoChas !== "" && motoChasPhoto && startKm !== "" && !submitting;
-  async function submit() { setSubmitting(true); await onStart({ tractorNumber, trailerNumber, motoChas, motoChasPhoto, startKm }); setSubmitting(false); }
+  const [tStat, setTStat] = useState("idle"); const [rStat, setRStat] = useState("idle");
+  const baseOk = !REQUIRE_IN_BASE || (tStat === "found" && rStat === "found");
+  const valid = tractorNumber && trailerNumber && motoChas !== "" && motoChasPhoto && startKm !== "" && !submitting && baseOk;
+  async function submit() { setSubmitting(true); await onStart({ tractorNumber: normNum(tractorNumber), trailerNumber: normNum(trailerNumber), motoChas, motoChasPhoto, startKm }); setSubmitting(false); }
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <Panel style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <div style={{ fontFamily: "Oswald", fontSize: 15, fontWeight: 600 }}>Reysni boshlash</div>
         <div style={{ fontSize: 12, color: COLORS.muted }}>Haydovchi: {driver.firstName} {driver.lastName}</div>
-        <Field label="Tyagach raqami" type="text" value={tractorNumber} onChange={setTractorNumber} placeholder="masalan: MHE 704" />
-        <Field label="Prisep raqami" type="text" value={trailerNumber} onChange={setTrailerNumber} placeholder="masalan: CO529" />
+        <NumberField label="Tyagach raqami" table="tractors" value={tractorNumber} onChange={setTractorNumber} onStatus={setTStat} placeholder="masalan: MHE 704" />
+        <NumberField label="Prisep raqami" table="trailers" value={trailerNumber} onChange={setTrailerNumber} onStatus={setRStat} placeholder="masalan: CO529" />
         <Field label="Moto-soat (prisep)" value={motoChas} onChange={setMotoChas} suffix="soat" />
         {motoChas !== "" && <PhotoPicker label="Motochas ko'rsatkichi rasmi" photo={motoChasPhoto} onPick={setMotoChasPhoto} onClear={() => setMotoChasPhoto(null)} required />}
         <Field label="Boshlang'ich km (tyagach spidometri)" value={startKm} onChange={setStartKm} suffix="km" />
@@ -1323,15 +1384,16 @@ function TractorEndForm({ trip, onBack, onClose, onSubmit }) {
 }
 function TractorAcceptForm({ trip, onBack, onClose, onSubmit }) {
   const [newTractorNumber, setNewTractorNumber] = useState(""); const [newKm, setNewKm] = useState(""); const [address, setAddress] = useState("");
-  const valid = newTractorNumber && newKm !== "" && address;
+  const [nStat, setNStat] = useState("idle");
+  const valid = newTractorNumber && newKm !== "" && address && (!REQUIRE_IN_BASE || nStat === "found");
   return (
     <ModalShell title="Yangi tyagachni qabul qilish" onClose={onClose}>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-        <Field label="Yangi tyagach raqami" type="text" value={newTractorNumber} onChange={setNewTractorNumber} />
+        <NumberField label="Yangi tyagach raqami" table="tractors" value={newTractorNumber} onChange={setNewTractorNumber} onStatus={setNStat} />
         <Field label="Yangi tyagachning hozirgi km" value={newKm} onChange={setNewKm} suffix="km" />
         <AddressPicker value={address} onChange={setAddress} />
         <div style={{ fontSize: 11, color: COLORS.muted }}>Bu boshqa transport vositasi bo'lgani uchun km hisoblanishi shu ko'rsatkichdan qaytadan boshlanadi. Profilga faol bo'lishi uchun keyin alohida TASDIQLASH kerak.</div>
-        <div style={{ display: "flex", gap: 10 }}><Btn variant="ghost" onClick={onBack} icon={ChevronLeft}>Orqaga</Btn><Btn full disabled={!valid} onClick={() => onSubmit({ newTractorNumber, newKm, address })} icon={Check}>Qabul qilish</Btn></div>
+        <div style={{ display: "flex", gap: 10 }}><Btn variant="ghost" onClick={onBack} icon={ChevronLeft}>Orqaga</Btn><Btn full disabled={!valid} onClick={() => onSubmit({ newTractorNumber: normNum(newTractorNumber), newKm, address })} icon={Check}>Qabul qilish</Btn></div>
       </div>
     </ModalShell>
   );
@@ -1367,15 +1429,15 @@ function TrailerAcceptForm({ trip, onBack, onClose, onSubmit }) {
   const [newTrailerNumber, setNewTrailerNumber] = useState(""); const [newKm, setNewKm] = useState(""); const [address, setAddress] = useState("");
   const [newMotoChas, setNewMotoChas] = useState(""); const [motoChasPhoto, setMotoChasPhoto] = useState(null);
   const [loadStatus, setLoadStatus] = useState("BEZ_GRUZ"); const [zamokPhoto, setZamokPhoto] = useState(null); const [dokPhoto, setDokPhoto] = useState(null);
-  const [confirming, setConfirming] = useState(false);
+  const [confirming, setConfirming] = useState(false); const [nStat, setNStat] = useState("idle");
   const validKm = newKm !== "" && num(newKm) >= num(trip.lastKm); const validLoad = loadStatus === "BEZ_GRUZ" || (zamokPhoto && dokPhoto);
-  const valid = newTrailerNumber && validKm && address && newMotoChas !== "" && motoChasPhoto && validLoad;
+  const valid = newTrailerNumber && validKm && address && newMotoChas !== "" && motoChasPhoto && validLoad && (!REQUIRE_IN_BASE || nStat === "found");
   if (confirming) {
     return (
       <ModalShell title="Tasdiqlash" onClose={onClose}>
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <div style={{ fontSize: 13.5, color: COLORS.text, lineHeight: 1.6 }}><b>{newTrailerNumber}</b> prisepini qabul qilishni tasdiqlaysizmi?</div>
-          <div style={{ display: "flex", gap: 10 }}><Btn variant="ghost" full onClick={() => setConfirming(false)}>Bekor qilish</Btn><Btn full onClick={() => onSubmit({ newTrailerNumber, newKm, address, motoChas: newMotoChas, motoChasPhoto, loadStatus, photos: [zamokPhoto, dokPhoto].filter(Boolean) })} icon={Check}>Ha, tasdiqlash</Btn></div>
+          <div style={{ display: "flex", gap: 10 }}><Btn variant="ghost" full onClick={() => setConfirming(false)}>Bekor qilish</Btn><Btn full onClick={() => onSubmit({ newTrailerNumber: normNum(newTrailerNumber), newKm, address, motoChas: newMotoChas, motoChasPhoto, loadStatus, photos: [zamokPhoto, dokPhoto].filter(Boolean) })} icon={Check}>Ha, tasdiqlash</Btn></div>
         </div>
       </ModalShell>
     );
@@ -1383,7 +1445,7 @@ function TrailerAcceptForm({ trip, onBack, onClose, onSubmit }) {
   return (
     <ModalShell title="Yangi prisepni qabul qilish" onClose={onClose}>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-        <Field label="Yangi prisep raqami" type="text" value={newTrailerNumber} onChange={setNewTrailerNumber} />
+        <NumberField label="Yangi prisep raqami" table="trailers" value={newTrailerNumber} onChange={setNewTrailerNumber} onStatus={setNStat} />
         <KmField label="Hozirgi umumiy km" value={newKm} onChange={setNewKm} lastKm={trip.lastKm} />
         <AddressPicker value={address} onChange={setAddress} />
         <Field label="Yangi prisep motochasi" value={newMotoChas} onChange={setNewMotoChas} suffix="soat" hint="Yangi prisep uchun hisob shu ko'rsatkichdan qaytadan boshlanadi" />
