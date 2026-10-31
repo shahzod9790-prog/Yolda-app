@@ -870,17 +870,26 @@ function SectionLabel({ children }) { return <div style={{ fontFamily: "Oswald",
 
 // ---------------- Fayl guruhlash (kalendar kuni bo'yicha) ----------------
 function dayKeyOf(ts) { const d = new Date(ts); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }
+// Qoida: bir nechta zagruzka (+ zapravka) va 1 ta vigruzka = 1 ta fayl (zadanya).
+// Vigruzka fayl ni yopadi; undan keyin kelgan keyingi zagruzka (yoki zapravka) YANGI fayl boshlaydi.
 function computeFiles(history) {
-  const days = []; const byKey = {};
-  history.forEach((ev) => {
-    if (!["zagruzka", "zapravka", "vigruzka"].includes(ev.type)) return;
-    const key = dayKeyOf(ev.at);
-    if (!byKey[key]) { byKey[key] = { dayKey: key, dayLabel: new Date(ev.at).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric" }), zagruzkas: [], zapravkas: [], vigruzkas: [] }; days.push(byKey[key]); }
-    if (ev.type === "zagruzka") byKey[key].zagruzkas.push(ev);
-    if (ev.type === "zapravka") byKey[key].zapravkas.push(ev);
-    if (ev.type === "vigruzka") byKey[key].vigruzkas.push(ev);
+  const files = [];
+  let cur = null;
+  const sorted = history.filter((ev) => ["zagruzka", "zapravka", "vigruzka"].includes(ev.type)).slice().sort((a, b) => a.at - b.at);
+  sorted.forEach((ev) => {
+    if (!cur || cur.closed) {
+      const d = new Date(ev.at);
+      cur = { dayKey: `f-${ev.id}`, dayLabel: d.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric" }), zagruzkas: [], zapravkas: [], vigruzkas: [], events: [], closed: false, fromAt: ev.at, toAt: ev.at };
+      files.push(cur);
+    }
+    if (ev.type === "zagruzka") cur.zagruzkas.push(ev);
+    if (ev.type === "zapravka") cur.zapravkas.push(ev);
+    if (ev.type === "vigruzka") { cur.vigruzkas.push(ev); cur.closed = true; }
+    cur.events.push(ev);
+    cur.toAt = ev.at;
   });
-  return days;
+  files.forEach((f, i) => { f.number = i + 1; });
+  return files;
 }
 
 // ---------------- Hosila holat (single source of truth = trip.history) ----------------
@@ -1490,10 +1499,11 @@ function FilesTab({ trip, driverLabel, onUpdateEvent, onSendAll }) {
   const hasPending = pendingHistory.length > 0;
 
   function renderFileEvents(f, editable) {
+    // Fayl ichidagi yozuvlar vaqt bo'yicha (eskisi tepada, oxirgisi pastda)
+    const FIELDS = { zagruzka: ["address", "km", "distance"], zapravka: ["km", "distance", "tractorLiters", "trailerLiters", "adBlue"], vigruzka: ["address", "km", "distance", "motoChas", "motoChasWorked"] };
+    const LABELS = { zagruzka: "ZAGRUZKA", zapravka: "ZAPRAVKA", vigruzka: "VIGRUZKA" };
     return (<>
-      {f.zagruzkas.map((z) => <EventDetail key={z.id} label="ZAGRUZKA" ev={z} fields={["address", "km", "distance"]} editable={editable} onEdit={() => setEditingEvent(z)} />)}
-      {f.zapravkas.map((z) => <EventDetail key={z.id} label="ZAPRAVKA" ev={z} fields={["km", "distance", "tractorLiters", "trailerLiters", "adBlue"]} editable={editable} onEdit={() => setEditingEvent(z)} />)}
-      {f.vigruzkas.map((z) => <EventDetail key={z.id} label="VIGRUZKA" ev={z} fields={["address", "km", "distance", "motoChas", "motoChasWorked"]} editable={editable} onEdit={() => setEditingEvent(z)} />)}
+      {f.events.map((z) => <EventDetail key={z.id} label={LABELS[z.type]} ev={z} fields={FIELDS[z.type]} editable={editable} onEdit={() => setEditingEvent(z)} />)}
     </>);
   }
 
@@ -1514,7 +1524,7 @@ function FilesTab({ trip, driverLabel, onUpdateEvent, onSendAll }) {
             return (
               <Panel key={key} style={{ padding: 0, overflow: "hidden" }}>
                 <button onClick={() => setOpenId(isOpen ? null : key)} style={{ width: "100%", background: "transparent", border: "none", padding: 16, display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", color: COLORS.text }}>
-                  <div style={{ textAlign: "left" }}><div style={{ fontFamily: "Oswald", fontSize: 14.5, fontWeight: 600 }}>FAYL — {f.dayLabel}</div><div style={{ fontSize: 11, color: COLORS.muted, marginTop: 2 }}>{[f.zagruzkas.length > 0 && `Zagruzka ×${f.zagruzkas.length}`, f.zapravkas.length > 0 && `Zapravka ×${f.zapravkas.length}`, f.vigruzkas.length > 0 && `Vigruzka ×${f.vigruzkas.length}`].filter(Boolean).join(" · ")}</div></div>
+                  <div style={{ textAlign: "left" }}><div style={{ fontFamily: "Oswald", fontSize: 14.5, fontWeight: 600 }}>FAYL {f.number} — {f.dayLabel}{f.closed ? "" : " · ochiq"}</div><div style={{ fontSize: 11, color: COLORS.muted, marginTop: 2 }}>{fmtDate(f.fromAt)} → {fmtDate(f.toAt)}</div><div style={{ fontSize: 11, color: COLORS.muted, marginTop: 2 }}>{[f.zagruzkas.length > 0 && `Zagruzka ×${f.zagruzkas.length}`, f.zapravkas.length > 0 && `Zapravka ×${f.zapravkas.length}`, f.vigruzkas.length > 0 && `Vigruzka ×${f.vigruzkas.length}`].filter(Boolean).join(" · ")}</div></div>
                   {isOpen ? <ChevronLeft size={16} color={COLORS.muted} /> : <ChevronRight size={16} color={COLORS.muted} />}
                 </button>
                 {isOpen && <div style={{ padding: "0 16px 16px", borderTop: `1px solid ${COLORS.border}`, paddingTop: 14, display: "flex", flexDirection: "column", gap: 14 }}>{renderFileEvents(f, true)}</div>}
