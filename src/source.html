@@ -897,6 +897,7 @@ function deriveTrip(trip) {
       case "tractor_end": { item.distance = num(ev.km) - km; km = num(ev.km); break; }
       case "tractor_confirmed": { km = num(ev.newKm); tractorStartKm = km; curTractor = ev.newTractorNumber; break; }
       case "trailer_end": { item.distance = num(ev.km) - km; km = num(ev.km); curTrailer = null; break; }
+      case "trip_end": { item.distance = num(ev.km) - km; km = num(ev.km); break; }
       case "trailer_confirmed": { motoChas = num(ev.motoChas); trailerStartMotoChas = motoChas; curTrailer = ev.newTrailerNumber; break; }
       default: break;
     }
@@ -1137,10 +1138,27 @@ function App() {
       busyRef.current = false;
     }
   }
-  async function resetTrip() {
-    await sb.rpc("end_trip", { p_trip_id: trip.id });
-    persistLocal({ ...local, activeTripId: null });
-    setTrip(null); setModal(null); setTab("main");
+  // Reysni yakunlash: yakuniy km (va manzil) "trip_end" yozuvi sifatida saqlanadi — u o'sha paytdagi holatga (yuk bilan / pustoy) qo'shiladi.
+  // Tyagach almashinuvi kutilayotgan bo'lsa (tyagach yakunlangan), km allaqachon yozilgan — data bo'lmaydi.
+  async function resetTrip(data) {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    try {
+      if (data && data.km !== undefined && data.km !== "") {
+        const { data: ex, error: e0 } = await sb.from("trip_events").select("id").eq("trip_id", trip.id).eq("type", "trip_end").limit(1);
+        if (e0) { setErrorMsg("Xatolik: " + e0.message); return; }
+        if (!ex || ex.length === 0) {
+          const { error: e1 } = await sb.from("trip_events").insert({ trip_id: trip.id, type: "trip_end", data: { km: num(data.km), address: data.address } });
+          if (e1) { setErrorMsg("Saqlashda xatolik: " + e1.message); return; }
+        }
+      }
+      const { error } = await sb.rpc("end_trip", { p_trip_id: trip.id });
+      if (error) { setErrorMsg("Reysni yakunlab bo'lmadi: " + error.message); return; }
+      persistLocal({ ...local, activeTripId: null });
+      setTrip(null); setModal(null); setTab("main");
+    } finally {
+      busyRef.current = false;
+    }
   }
 
   if (loading) {
@@ -1647,8 +1665,30 @@ function EventDetail({ label, ev, fields, standalonePanel, editable, onEdit }) {
 }
 
 // ---------------- Profil ----------------
+function EndTripPanel({ trip, onEnd }) {
+  const [open, setOpen] = useState(false);
+  const [km, setKm] = useState(""); const [address, setAddress] = useState(""); const [busy, setBusy] = useState(false);
+  const tractorEnded = !!(trip.pendingTractor && trip.pendingTractor.finish); // tyagach yakunlangan — yakuniy km o'sha yerda yozilgan
+  const unsent = trip.history.filter((e) => !e.batchId && ["zagruzka", "zapravka", "vigruzka"].includes(e.type)).length;
+  const valid = tractorEnded || (km !== "" && num(km) >= num(trip.lastKm) && !!address);
+  async function go() { setBusy(true); try { await onEnd(tractorEnded ? null : { km, address }); } finally { setBusy(false); } }
+  return (
+    <Panel>
+      <div style={{ fontFamily: "Oswald", fontSize: 13.5, fontWeight: 600, marginBottom: 8 }}>Reysni yakunlash</div>
+      <div style={{ fontSize: 11.5, color: COLORS.muted, marginBottom: 10 }}>Bu amal tyagach va prisepni bazada "bo'sh" holatiga o'tkazadi va reysni yopadi. Yakuniy kilometr yuk bilan yoki yuksiz yurilgan masofaga o'zi qo'shiladi.</div>
+      {!open ? <Btn variant="danger" full onClick={() => setOpen(true)}>Reysni yakunlash</Btn> : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          {unsent > 0 && <div style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12, color: COLORS.amber, lineHeight: 1.5 }}><AlertTriangle size={15} style={{ flexShrink: 0, marginTop: 2 }} /><span>Yuborilmagan {unsent} ta yozuv bor. Avval «Fayllar» bo'limidan jo'nating, so'ng reysni yakunlang.</span></div>}
+          {tractorEnded
+            ? <div style={{ fontSize: 12, color: COLORS.muted, lineHeight: 1.5 }}>Tyagach yakunlangan, yakuniy km allaqachon yozilgan.</div>
+            : (<><KmField label="Yakuniy umumiy km" value={km} onChange={setKm} lastKm={trip.lastKm} /><AddressPicker value={address} onChange={setAddress} /></>)}
+          <div style={{ display: "flex", gap: 10 }}><Btn variant="ghost" onClick={() => setOpen(false)}>Bekor qilish</Btn><Btn variant="danger" full disabled={!valid || busy} onClick={go}>{busy ? "Yakunlanmoqda..." : "Tasdiqlayman"}</Btn></div>
+        </div>
+      )}
+    </Panel>
+  );
+}
 function ProfilTab({ driver, trip, onReset }) {
-  const [confirmingReset, setConfirmingReset] = useState(false);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <Panel><div style={{ fontFamily: "Oswald", fontSize: 15, fontWeight: 600, marginBottom: 12 }}>Haydovchi</div><div style={{ fontSize: 14 }}>{driver.firstName} {driver.lastName}</div></Panel>
@@ -1660,13 +1700,7 @@ function ProfilTab({ driver, trip, onReset }) {
         </div>
         {trip.motoChasPhoto && <div style={{ marginTop: 14 }}><PhotoGroup label="Boshlang'ich motochas rasmi" photos={[trip.motoChasPhoto]} /></div>}
       </Panel>
-      <Panel>
-        <div style={{ fontFamily: "Oswald", fontSize: 13.5, fontWeight: 600, marginBottom: 8 }}>Reysni yakunlash</div>
-        <div style={{ fontSize: 11.5, color: COLORS.muted, marginBottom: 10 }}>Bu amal tyagach va prisepni bazada "bo'sh" holatiga o'tkazadi va reysni yopadi.</div>
-        {!confirmingReset ? <Btn variant="danger" full onClick={() => setConfirmingReset(true)}>Reysni yakunlash</Btn> : (
-          <div style={{ display: "flex", gap: 10 }}><Btn variant="ghost" onClick={() => setConfirmingReset(false)}>Bekor qilish</Btn><Btn variant="danger" full onClick={onReset}>Tasdiqlayman</Btn></div>
-        )}
-      </Panel>
+      <EndTripPanel trip={trip} onEnd={onReset} />
     </div>
   );
 }
