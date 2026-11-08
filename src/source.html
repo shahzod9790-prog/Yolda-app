@@ -173,6 +173,26 @@ function saveLocal(v) {
   try { localStorage.setItem("yolda_local", JSON.stringify(v)); } catch {}
 }
 
+// ---------------- Kirish (telefon + parol) ----------------
+// Haydovchi telefon raqami + ofis bergan parol bilan kiradi. Supabase Auth "email" talab qiladi, shuning uchun
+// telefon raqamidan ichki "email" yasaladi (haydovchiga ko'rinmaydi; ofis funksiyasidagi bilan bir xil bo'lishi shart).
+const AUTH_EMAIL_DOMAIN = "driver.yolda.app";
+function normPhone(s) {
+  let d = String(s || "").replace(/\D/g, "");
+  if (d.startsWith("00")) d = d.slice(2);
+  if (d.length === 9) d = "998" + d; // O'zbekiston milliy yozuvi: 90 123 45 67
+  return d;
+}
+const phoneEmail = (p) => normPhone(p) + "@" + AUTH_EMAIL_DOMAIN;
+const phoneOk = (p) => { const d = normPhone(p); return d.length >= 10 && d.length <= 15; };
+function prettyPhone(d) { const m = /^998(\d{2})(\d{3})(\d{2})(\d{2})$/.exec(d || ""); return m ? "+998 " + m[1] + " " + m[2] + " " + m[3] + " " + m[4] : d ? "+" + d : ""; }
+function genToken() { const a = new Uint8Array(32); window.crypto.getRandomValues(a); return Array.from(a, (b) => b.toString(16).padStart(2, "0")).join(""); }
+// "So'rov" (ofisdan parol so'rash) faqat shu qurilmada saqlanadi: token faqat shu telefonda bor, bazada uning xeshi turadi.
+const REQ_KEY = "yolda_request";
+function loadReq() { try { const r = JSON.parse(localStorage.getItem(REQ_KEY)); return r && r.token ? r : null; } catch { return null; } }
+function saveReq(r) { try { localStorage.setItem(REQ_KEY, JSON.stringify(r)); } catch {} }
+function clearReq() { try { localStorage.removeItem(REQ_KEY); } catch {} }
+
 const COLORS = {
   bg: "#14171A", panel: "#1D2126", panel2: "#232830", border: "#2B3138",
   amber: "#F5A623", green: "#3CE07A", red: "#FF5C5C", text: "#ECEDEE", muted: "#828A93",
@@ -316,6 +336,7 @@ const User = (p) => <Icon {...p}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 
 const Gauge = (p) => <Icon {...p}><path d="M12 15l3.5-5"/><circle cx="12" cy="12" r="10"/><path d="M6.5 19a7.5 7.5 0 0 1 11 0"/></Icon>;
 const Plus = (p) => <Icon {...p}><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></Icon>;
 const ArrowRight = (p) => <Icon {...p}><line x1="5" y1="12" x2="19" y2="12"/><path d="M12 5l7 7-7 7"/></Icon>;
+const LogOut = (p) => <Icon {...p}><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></Icon>;
 
 const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Roboto+Mono:wght@500;700&family=Inter:wght@400;500;600&display=swap');`;
 
@@ -995,35 +1016,76 @@ function App() {
   const [errorMsg, setErrorMsg] = useState(null);
   const busyRef = useRef(false); // guards against double-submit (double-tap) writing the same event twice
 
+  const [confirmLogout, setConfirmLogout] = useState(false);
+
+  // Hisobdan chiqish (yoki sessiya serverda bekor qilingan): qurilma "haydovchisiz" holatga qaytadi. Reys ma'lumotlari bazada qoladi.
+  function hardLogout() {
+    const empty = { driver: null, activeTripId: null };
+    saveLocal(empty); setLocal(empty); setTrip(null); setTab("main"); setModal(null); setErrorMsg(null); setConfirmLogout(false);
+  }
+
   useEffect(() => {
     (async () => {
-      const l = loadLocal();
+      let l = loadLocal();
+      if (l.driver && !l.driver.id) { l = { driver: null, activeTripId: null }; saveLocal(l); } // eski (parolsiz) kirish — endi telefon+parol bilan kirish kerak
       setLocal(l);
-      if (l.activeTripId) { const t = await fetchTripFull(l.activeTripId); setTrip(t); }
+      if (l.driver && l.activeTripId) { const t = await fetchTripFull(l.activeTripId); setTrip(t); }
       setLoading(false);
+      if (l.driver) {
+        // Sessiya haqiqatan yo'q bo'lsa (masalan ofis hisobni o'chirgan) — qayta kirish talab qilinadi. Internet xatosida tegmaymiz (yo'lda aloqa uzilishi mumkin).
+        try { const { data, error } = await sb.auth.getSession(); if (!error && data && !data.session) hardLogout(); } catch {}
+      }
     })();
+    const { data: sub } = sb.auth.onAuthStateChange((ev) => { if (ev === "SIGNED_OUT") hardLogout(); });
+    return () => { try { sub.subscription.unsubscribe(); } catch {} };
   }, []);
 
   function persistLocal(next) { setLocal(next); saveLocal(next); }
+
+  // Kirgan haydovchi uchun: ochiq (tugatilmagan) reysi bo'lsa — davom ettiriladi
+  async function enterAsDriver(drv) {
+    setErrorMsg(null);
+    const driver = { id: drv.id, firstName: drv.first_name, lastName: drv.last_name };
+    const { data: openTrip } = await sb.from("trips").select("id").eq("driver_id", drv.id).eq("completed", false).order("started_at", { ascending: false }).limit(1).maybeSingle();
+    if (openTrip) {
+      const t = await fetchTripFull(openTrip.id);
+      persistLocal({ driver, activeTripId: openTrip.id });
+      setTrip(t); setTab("main");
+      return;
+    }
+    persistLocal({ driver, activeTripId: null });
+  }
+
+  // Xato matni qaytaradi (yoki muvaffaqiyatda null)
+  async function login(phone, password, fromRequest) {
+    try {
+      const { data, error } = await withTimeout(sb.auth.signInWithPassword({ email: phoneEmail(phone), password }), 15000);
+      if (error) {
+        const m = String(error.message || "");
+        return /banned/i.test(m) ? "Hisobingiz o'chirilgan. Ofisga murojaat qiling."
+          : /invalid login|invalid credentials/i.test(m) ? "Telefon raqam yoki parol noto'g'ri."
+          : /fetch|network|timeout/i.test(m) ? "Internet aloqasi yo'q. Qayta urinib ko'ring."
+          : "Kirib bo'lmadi: " + m;
+      }
+      const { data: drv, error: e2 } = await sb.from("drivers").select("id,first_name,last_name,active").eq("auth_user_id", data.user.id).maybeSingle();
+      if (e2) { await sb.auth.signOut({ scope: "local" }); return "Hisob ma'lumotini olib bo'lmadi. Qayta urinib ko'ring."; }
+      if (!drv || drv.active === false) { await sb.auth.signOut({ scope: "local" }); return "Hisobingiz faol emas. Ofisga murojaat qiling."; }
+      const r = loadReq();
+      if (r) { try { await sb.rpc("request_ack", { p_token: r.token }); } catch {} clearReq(); } // parol ofis bazasidan o'chiriladi
+      await enterAsDriver(drv);
+      return null;
+    } catch (e) {
+      return e && e.message === "timeout" ? "Internet sekin yoki yo'q. Qayta urinib ko'ring." : "Kirib bo'lmadi: " + (e && e.message);
+    }
+  }
+  async function logout() {
+    try { await sb.auth.signOut({ scope: "local" }); } catch {}
+    hardLogout();
+  }
   async function refreshTrip() {
     if (!local?.activeTripId) return;
     const t = await fetchTripFull(local.activeTripId);
     if (t) setTrip(t); else setErrorMsg("Ma'lumotni yangilab bo'lmadi. Internet aloqasini tekshirib, sahifani yangilang."); // xatoda mavjud reys ekrandan yo'qolmasin
-  }
-
-  async function saveDriver(driver) {
-    setErrorMsg(null);
-    const { data: drv } = await sb.from("drivers").select("id").eq("first_name", driver.firstName).eq("last_name", driver.lastName).maybeSingle();
-    if (drv) {
-      const { data: openTrip } = await sb.from("trips").select("id").eq("driver_id", drv.id).eq("completed", false).order("started_at", { ascending: false }).limit(1).maybeSingle();
-      if (openTrip) {
-        const t = await fetchTripFull(openTrip.id);
-        persistLocal({ driver, activeTripId: openTrip.id });
-        setTrip(t); setTab("main");
-        return;
-      }
-    }
-    persistLocal({ driver, activeTripId: null });
   }
 
   async function startTrip(data) {
@@ -1198,7 +1260,8 @@ function App() {
       <div style={{ padding: "20px 18px 14px", borderBottom: `1px solid ${COLORS.border}` }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div style={{ width: 34, height: 34, borderRadius: 8, background: COLORS.amber, display: "flex", alignItems: "center", justifyContent: "center" }}><Truck size={19} color="#1A1300" /></div>
-          <div><div style={{ fontFamily: "Oswald", fontWeight: 700, fontSize: 19, letterSpacing: 0.5 }}>YO'LDA</div><div style={{ fontSize: 11, color: COLORS.muted, marginTop: -2 }}>reys va yoqilg'i nazorati</div></div>
+          <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontFamily: "Oswald", fontWeight: 700, fontSize: 19, letterSpacing: 0.5 }}>YO'LDA</div><div style={{ fontSize: 11, color: COLORS.muted, marginTop: -2 }}>reys va yoqilg'i nazorati</div></div>
+          {local.driver && <button onClick={() => setConfirmLogout(true)} aria-label="Chiqish" style={{ background: "transparent", border: `1px solid ${COLORS.border}`, color: COLORS.muted, borderRadius: 8, padding: "7px 10px", display: "flex", alignItems: "center", gap: 6, fontFamily: "Inter", fontWeight: 600, fontSize: 12, cursor: "pointer", flexShrink: 0 }}><LogOut size={14} />Chiqish</button>}
         </div>
       </div>
 
@@ -1210,7 +1273,7 @@ function App() {
       )}
 
       <div style={{ maxWidth: 480, margin: "0 auto", padding: "16px 16px 0" }}>
-        {!local.driver ? <ProfileSetup onSave={saveDriver} />
+        {!local.driver ? <AuthScreen onLogin={login} />
           : !trip ? <StartTripForm driver={local.driver} onStart={startTrip} />
           : tab === "main" ? <MainScreen trip={viewTrip} onOpen={setModal} />
           : tab === "files" ? <FilesTab trip={viewTrip} driverLabel={`${local.driver.firstName} ${local.driver.lastName}`} onUpdateEvent={updateEvent} onSendAll={sendAllFiles} />
@@ -1222,6 +1285,16 @@ function App() {
       {modal === "vigruzka" && viewTrip.trailerNumber && <VigruzkaModal trip={viewTrip} onClose={() => setModal(null)} onSubmit={(d) => addEvent("vigruzka", d)} />}
       {modal === "zamenit" && (
         <ZamenitModal trip={viewTrip} onClose={() => setModal(null)} tractorFinish={tractorFinish} tractorAccept={tractorAccept} tractorConfirm={tractorConfirm} trailerFinish={trailerFinish} trailerAccept={trailerAccept} trailerConfirm={trailerConfirm} />
+      )}
+
+      {confirmLogout && (
+        <div role="dialog" aria-label="Hisobdan chiqish" style={{ position: "fixed", inset: 0, zIndex: 80, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+          <div style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 18, width: "100%", maxWidth: 360, display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ fontFamily: "Oswald", fontSize: 16, fontWeight: 600 }}>Hisobdan chiqasizmi?</div>
+            <div style={{ fontSize: 12.5, color: COLORS.muted, lineHeight: 1.5 }}>{local.driver.firstName} {local.driver.lastName} hisobidan chiqasiz. Reys ma'lumotlari saqlanadi — qayta kirganingizda reysingiz davom etadi.</div>
+            <div style={{ display: "flex", gap: 10 }}><Btn variant="ghost" onClick={() => setConfirmLogout(false)}>Bekor qilish</Btn><Btn variant="danger" full onClick={logout}>Chiqish</Btn></div>
+          </div>
+        </div>
       )}
 
       {trip && (
@@ -1240,18 +1313,174 @@ function TabBtn({ label, icon: IconC, active, onClick }) {
 }
 
 // ---------------- Ekranlar ----------------
-function ProfileSetup({ onSave }) {
-  const [firstName, setFirstName] = useState(""); const [lastName, setLastName] = useState(""); const [checking, setChecking] = useState(false);
-  async function submit() { setChecking(true); await onSave({ firstName, lastName }); setChecking(false); }
+// ---------------- Kirish ekrani: Kirish / So'rov / Xabarlar ----------------
+// Oqim: haydovchi ism-familya + telefon yozib ofisga SO'ROV yuboradi → ofis paneli tasdiqlaydi va parol yaratadi →
+// parol shu yerda "Xabarlar" bo'limida chiqadi → haydovchi telefon + parol bilan KIRADI.
+function AuthField({ label, value, onChange, type = "text", placeholder, inputMode, autoComplete, capitalize, onEnter }) {
+  return (
+    <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <span style={{ fontFamily: "Inter", fontSize: 12.5, color: COLORS.muted, fontWeight: 500 }}>{label}</span>
+      <input type={type} inputMode={inputMode} autoComplete={autoComplete} autoCapitalize={capitalize || "off"} autoCorrect="off" spellCheck={false} value={value} placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && onEnter) onEnter(); }}
+        style={{ width: "100%", boxSizing: "border-box", background: COLORS.panel2, border: `1px solid ${COLORS.border}`, borderRadius: 8, padding: "11px 12px", color: COLORS.text, fontFamily: "'Roboto Mono', monospace", fontSize: 15, fontWeight: 500, outline: "none" }} />
+    </label>
+  );
+}
+function InlineNote({ tone = "muted", children }) {
+  const c = tone === "red" ? COLORS.red : tone === "green" ? COLORS.green : tone === "amber" ? COLORS.amber : COLORS.muted;
+  return <div role={tone === "red" ? "alert" : "status"} style={{ fontSize: 12.5, color: c, lineHeight: 1.5 }}>{children}</div>;
+}
+// Ofisdan javobni (so'rov holatini) vaqti-vaqti bilan so'rab turadi. Faqat javob kutilayotganda tekshiradi.
+function useRequestStatus(req) {
+  const [st, setSt] = useState(null); // { status, message, password } | { missing: true } | null
+  const [checking, setChecking] = useState(false);
+  const [offline, setOffline] = useState(false);
+  const reqRef = useRef(req); reqRef.current = req;
+  const stRef = useRef(st); stRef.current = st;
+  async function check() {
+    const r = reqRef.current; if (!r) return;
+    setChecking(true);
+    try {
+      const { data, error } = await withTimeout(sb.rpc("request_status", { p_token: r.token }), 8000);
+      if (error) throw error;
+      if (!reqRef.current || reqRef.current.token !== r.token) return;
+      const row = Array.isArray(data) ? data[0] : data;
+      setSt(row ? { status: row.status, message: row.message, password: row.password } : { missing: true });
+      setOffline(false);
+    } catch { setOffline(true); }
+    finally { setChecking(false); }
+  }
+  useEffect(() => {
+    setSt(null); setOffline(false);
+    if (!req) return;
+    check();
+    const waiting = () => { const s = stRef.current; return !s || s.status === "pending"; };
+    const iv = setInterval(() => { if (!document.hidden && waiting()) check(); }, 6000);
+    const vis = () => { if (!document.hidden && waiting()) check(); };
+    document.addEventListener("visibilitychange", vis);
+    return () => { clearInterval(iv); document.removeEventListener("visibilitychange", vis); };
+  }, [req ? req.token + ":" + req.at : ""]); // qayta yuborilgan so'rov (token bir xil, vaqt boshqa) holatni yangidan tekshirtiradi
+  return { st, checking, offline, check };
+}
+function AuthScreen({ onLogin }) {
+  const [req, setReq] = useState(loadReq);
+  const [tab, setTab] = useState(() => (loadReq() ? "inbox" : "login"));
+  const [phone, setPhone] = useState(() => { const r = loadReq(); return r ? prettyPhone(r.phone) : ""; });
+  const { st, checking, offline, check } = useRequestStatus(req);
+  const hasMsg = !!st && !st.missing && (st.status === "rejected" || (st.status === "approved" && !!st.password));
+  const tabs = [{ id: "login", label: "Kirish" }, { id: "request", label: "So'rov" }, { id: "inbox", label: "Xabarlar" }];
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ display: "flex", gap: 8 }}>
+        {tabs.map((t) => (
+          <button key={t.id} onClick={() => setTab(t.id)} aria-pressed={tab === t.id} style={{ flex: 1, position: "relative", padding: "10px 0", borderRadius: 8, border: `1px solid ${tab === t.id ? COLORS.amber : COLORS.border}`, background: tab === t.id ? COLORS.amber + "1A" : COLORS.panel2, color: tab === t.id ? COLORS.amber : COLORS.text, fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: "Inter" }}>
+            {t.label}
+            {t.id === "inbox" && hasMsg && <span aria-label="yangi xabar" data-testid="inbox-dot" style={{ position: "absolute", top: 6, right: 10, width: 8, height: 8, borderRadius: 4, background: COLORS.green }} />}
+          </button>
+        ))}
+      </div>
+      {tab === "login" && <LoginForm initialPhone={phone} onPhone={setPhone} onLogin={onLogin} onRequest={() => setTab("request")} />}
+      {tab === "request" && <RequestForm initialPhone={phone} reuse={req && st && !st.missing && st.status !== "approved" ? req.token : null} onSent={(r) => { setReq(r); setPhone(prettyPhone(r.phone)); setTab("inbox"); }} />}
+      {tab === "inbox" && <InboxTab req={req} st={st} checking={checking} offline={offline} onRefresh={check} onLogin={onLogin} onNew={() => setTab("request")} />}
+    </div>
+  );
+}
+function LoginForm({ initialPhone, onPhone, onLogin, onRequest }) {
+  const [phone, setPhone] = useState(initialPhone || ""); const [password, setPassword] = useState("");
+  const [show, setShow] = useState(false); const [busy, setBusy] = useState(false); const [err, setErr] = useState(null);
+  const valid = phoneOk(phone) && password.length >= 4 && !busy;
+  async function submit() {
+    if (!valid) return;
+    setBusy(true); setErr(null); onPhone(phone);
+    try { const m = await onLogin(phone, password.trim(), false); if (m) setErr(m); } finally { setBusy(false); }
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <Panel style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ fontFamily: "Oswald", fontSize: 15, fontWeight: 600 }}>Kirish</div>
+        <AuthField label="Telefon raqami" type="tel" inputMode="tel" autoComplete="tel" value={phone} onChange={setPhone} placeholder="+998 90 123 45 67" onEnter={submit} />
+        <AuthField label="Parol" type={show ? "text" : "password"} autoComplete="current-password" value={password} onChange={setPassword} onEnter={submit} />
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: COLORS.muted, cursor: "pointer" }}><input type="checkbox" checked={show} onChange={(e) => setShow(e.target.checked)} />Parolni ko'rsatish</label>
+        {err && <InlineNote tone="red">{err}</InlineNote>}
+      </Panel>
+      <Btn full disabled={!valid} onClick={submit} icon={Check}>{busy ? "Kirilmoqda..." : "KIRISH"}</Btn>
+      <div style={{ fontSize: 12.5, color: COLORS.muted, textAlign: "center" }}>
+        Parol yo'qmi yoki unutdingizmi? <button onClick={onRequest} style={{ background: "transparent", border: "none", color: COLORS.amber, fontWeight: 600, fontSize: 12.5, cursor: "pointer", padding: "6px 2px", fontFamily: "Inter" }}>Ofisdan so'rang</button>
+      </div>
+    </div>
+  );
+}
+function RequestForm({ initialPhone, reuse, onSent }) {
+  const [first, setFirst] = useState(""); const [last, setLast] = useState(""); const [phone, setPhone] = useState(initialPhone || "");
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState(null);
+  const valid = first.trim() && last.trim() && phoneOk(phone) && !busy;
+  async function submit() {
+    if (!valid) return;
+    setBusy(true); setErr(null);
+    // Token avval saqlanadi: so'rov ketdi-yu javob kelmay qolsa ham, haydovchi Xabarlar bo'limida holatni ko'ra oladi.
+    const r = { token: reuse || genToken(), firstName: first.trim(), lastName: last.trim(), phone: normPhone(phone), at: Date.now() };
+    const prev = loadReq(); saveReq(r);
+    try {
+      const { error } = await withTimeout(sb.rpc("request_access", { p_token: r.token, p_first: r.firstName, p_last: r.lastName, p_phone: r.phone }), 12000);
+      if (error) {
+        const m = String(error.message || "");
+        if (/BAD_NAME|BAD_PHONE|TOO_MANY|ALREADY_USED|BAD_TOKEN/.test(m)) {
+          if (prev) saveReq(prev); else clearReq();
+          setErr(/BAD_NAME/.test(m) ? "Ism va familiyani to'g'ri yozing." : /BAD_PHONE/.test(m) ? "Telefon raqamni to'liq yozing." : /TOO_MANY/.test(m) ? "Bu raqamdan juda ko'p so'rov yuborilgan. Ofisga murojaat qiling." : "So'rovni yuborib bo'lmadi. Qayta urinib ko'ring.");
+          return;
+        }
+        throw error;
+      }
+      onSent(r);
+    } catch (e) {
+      // Aloqa muammosi: so'rov yetib borgan bo'lishi mumkin — Xabarlar bo'limi holatni o'zi aniqlaydi ("topilmadi" bo'lsa qayta yuboriladi)
+      onSent(r);
+    } finally { setBusy(false); }
+  }
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <Panel style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-        <div style={{ fontFamily: "Oswald", fontSize: 15, fontWeight: 600 }}>Haydovchi profili</div>
-        <Field label="Ism" type="text" value={firstName} onChange={setFirstName} />
-        <Field label="Familiya" type="text" value={lastName} onChange={setLastName} />
+        <div style={{ fontFamily: "Oswald", fontSize: 15, fontWeight: 600 }}>Ofisdan parol so'rash</div>
+        <div style={{ fontSize: 12, color: COLORS.muted, lineHeight: 1.5 }}>Ism-familya va telefon raqamingizni yozing. Ofis so'rovni ko'rib, parolni «Xabarlar» bo'limiga yuboradi.</div>
+        <AuthField label="Ism" capitalize="words" autoComplete="given-name" value={first} onChange={setFirst} />
+        <AuthField label="Familiya" capitalize="words" autoComplete="family-name" value={last} onChange={setLast} />
+        <AuthField label="Telefon raqami" type="tel" inputMode="tel" autoComplete="tel" value={phone} onChange={setPhone} placeholder="+998 90 123 45 67" />
+        {err && <InlineNote tone="red">{err}</InlineNote>}
       </Panel>
-      <Btn full disabled={!firstName || !lastName || checking} onClick={submit} icon={Check}>{checking ? "Tekshirilmoqda..." : "Davom etish"}</Btn>
+      <Btn full disabled={!valid} onClick={submit} icon={Check}>{busy ? "Yuborilmoqda..." : "SO'ROV YUBORISH"}</Btn>
     </div>
+  );
+}
+function InboxTab({ req, st, checking, offline, onRefresh, onLogin, onNew }) {
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState(null); const [copied, setCopied] = useState(false);
+  if (!req) return <Panel><div style={{ fontFamily: "Oswald", fontSize: 15, fontWeight: 600, marginBottom: 8 }}>Xabarlar</div><InlineNote>Hozircha xabar yo'q. Parol olish uchun avval «So'rov» bo'limidan ofisga so'rov yuboring.</InlineNote><div style={{ marginTop: 12 }}><Btn full variant="ghost" onClick={onNew}>So'rov yuborish</Btn></div></Panel>;
+  async function enter() { setBusy(true); setErr(null); try { const m = await onLogin(req.phone, st.password, true); if (m) setErr(m); } finally { setBusy(false); } }
+  async function copy() { try { await navigator.clipboard.writeText(st.password); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch {} }
+  const who = req.firstName + " " + req.lastName + " · " + prettyPhone(req.phone);
+  let body;
+  if (!st) body = <InlineNote>{offline ? "Aloqa yo'q — internetni tekshiring." : "Tekshirilmoqda…"}</InlineNote>;
+  else if (st.missing) body = (<><InlineNote tone="amber">So'rovingiz ofis ro'yxatida topilmadi (yuborilmagan yoki ofis o'chirgan bo'lishi mumkin). Qayta yuboring.</InlineNote><Btn full onClick={onNew}>Qayta yuborish</Btn></>);
+  else if (st.status === "pending") body = (<><InlineNote tone="amber">⏳ So'rovingiz ofisga yuborildi. Javob kutilmoqda…</InlineNote><InlineNote>Ofis tasdiqlagach, parol shu yerda paydo bo'ladi. Ilovani yopib qo'ysangiz ham bo'ladi — keyinroq «Xabarlar»ga kiring.</InlineNote>{offline && <InlineNote tone="red">Aloqa yo'q — internetni tekshiring.</InlineNote>}<Btn full variant="ghost" disabled={checking} onClick={onRefresh}>{checking ? "Tekshirilmoqda..." : "Yangilash"}</Btn></>);
+  else if (st.status === "rejected") body = (<><InlineNote tone="red">So'rovingiz rad etildi.</InlineNote>{st.message && <div style={{ background: COLORS.panel2, borderRadius: 8, padding: 12, fontSize: 13.5, lineHeight: 1.5 }}>{st.message}</div>}<Btn full variant="ghost" onClick={onNew}>Yangi so'rov yuborish</Btn></>);
+  else if (st.password) body = (
+    <>
+      <InlineNote tone="green">✓ So'rovingiz tasdiqlandi. Ofis sizga parol yubordi:</InlineNote>
+      <div style={{ background: COLORS.panel2, border: `1px solid ${COLORS.green}66`, borderRadius: 10, padding: "14px 12px", textAlign: "center" }}>
+        <div style={{ fontSize: 11, color: COLORS.muted, marginBottom: 6 }}>Parolingiz</div>
+        <div data-testid="inbox-password" style={{ fontFamily: "'Roboto Mono', monospace", fontSize: 26, fontWeight: 700, letterSpacing: 3, color: COLORS.green, userSelect: "all" }}>{st.password}</div>
+      </div>
+      {err && <InlineNote tone="red">{err}</InlineNote>}
+      <div style={{ display: "flex", gap: 10 }}><Btn variant="ghost" onClick={copy}>{copied ? "Nusxalandi ✓" : "Nusxalash"}</Btn><Btn full disabled={busy} onClick={enter} icon={Check}>{busy ? "Kirilmoqda..." : "KIRISH"}</Btn></div>
+      <InlineNote>Parolni yozib oling — keyingi safar «Kirish» bo'limida telefon raqamingiz va shu parol bilan kirasiz.</InlineNote>
+    </>
+  );
+  else body = (<><InlineNote tone="amber">So'rovingiz tasdiqlangan, parol esa avval berilgan. «Kirish» bo'limidan parol bilan kiring. Parolni unutgan bo'lsangiz, yangi so'rov yuboring.</InlineNote><Btn full variant="ghost" onClick={onNew}>Yangi parol so'rash</Btn></>);
+  return (
+    <Panel style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ fontFamily: "Oswald", fontSize: 15, fontWeight: 600 }}>Xabarlar</div>
+      <div style={{ fontSize: 12, color: COLORS.muted }}>{who}</div>
+      {body}
+    </Panel>
   );
 }
 function StartTripForm({ driver, onStart }) {
